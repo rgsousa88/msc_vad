@@ -1,0 +1,22 @@
+{
+    "model":"camera_classifier",
+    "input_size": [120, 214],
+    "seqLen": 10,
+    "fstride": 10,
+    "cstride": 10,
+    "tempPool": 5,
+    "lr": 1e-3,
+    "optmizer": "adam",
+    "loss": "cross_entropy",
+    "batch_size": 8,
+    "num_epochs": 1,
+    "scheduler": "step",
+    "scheduler_param": {"step_size": 10,
+                        "t_max": 1000,
+                        "eta_min":1e-10},
+    "use_gpu": true,
+    "dataset": "Shanghai",
+    "trainPath": "/mnt/c/dataset/MSC/shangai/train_mp4",
+    "valPath": "/mnt/c/dataset/MSC/shangai/val_mp4",
+    "num_classes": 13
+}
