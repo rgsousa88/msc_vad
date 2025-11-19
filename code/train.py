@@ -53,13 +53,13 @@ def train(config):
                           sequence_length=config['seqLen'], stride=config['fstride'], step=config['cstride'],
                           batch_size=config['batch_size'])
     trainPipe.build()
-    trainLoader = DALIGenericIterator(trainPipe, ['videos','labels'])
+    trainLoader = DALIGenericIterator(trainPipe, ['videos','labels'], reader_name='seq')
 
-    valPipe = bd.video_pipe(file_root=config['trainPath'], train=False, shape=shape,
+    valPipe = bd.video_pipe(file_root=config['valPath'], train=False, shape=shape,
                           sequence_length=config['seqLen'], stride=config['fstride'], step=config['cstride'],
                           batch_size=config['batch_size'])
     valPipe.build()
-    valLoader = DALIGenericIterator(valPipe, ['videos','labels'])
+    valLoader = DALIGenericIterator(valPipe, ['videos','labels'], reader_name='seq')
 
     model = CameraClassifier(n_classes=config['num_classes'], temp_pool=config['tempPool'])
     model = model.to(device=device)
@@ -135,8 +135,11 @@ def train(config):
         val_acc = acc_value / n_batches
 
         if val_acc > best_val_acc and val_acc > MIN_VAL_ACC:
+            diffAcc = abs(val_acc - best_val_acc)
             best_val_acc = val_acc
-            saveModel(model=model, epoch=epoch, val_loss=val_loss, val_acc=val_acc)
+            saveModel(config=config, model=model, epoch=epoch, val_loss=val_loss, val_acc=val_acc)
+            if diffAcc < 1e-4:
+                break
 
         epochReport = f"Train Loss {train_loss:.4f} Val Loss {val_loss:.4f}\nTrain Acc {train_acc:.4f} Val Acc {val_acc:.4f}"
         print(f"Epoch {epoch} LR {optimizer.param_groups[0]['lr']:.4f} {epochReport}")

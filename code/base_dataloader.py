@@ -22,7 +22,7 @@ def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_le
                                     stride=stride,
                                     step=step,
                                     random_shuffle=True,
-                                    initial_fill=initial_pref)
+                                    initial_fill=initial_pref, name='seq')
     
     if train:
         mirror = fn.random.choice(2)
