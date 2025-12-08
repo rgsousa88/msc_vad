@@ -7,6 +7,19 @@ import torch.optim.lr_scheduler as lr_scheduler
 import os
 from datetime import datetime
 
+class ReconCustomLoss(nn.Module):
+    def __init__(self, reduction='sum'):
+        super().__init()
+        self.reduction = reduction
+    
+    def forward(self, input, target):
+        batch_size = input.shape[0]
+        loss = (F.mse_loss(F.sigmoid(input), target, reduction=self.reduction)
+                + F.l1_loss(F.sigmoid(input), target, reduction=self.reduction)) / batch_size
+        
+        return loss
+
+
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1, gamma=2, reduction='mean'):
         super(FocalLoss, self).__init__()
@@ -34,7 +47,9 @@ def get_losses(loss_name, **kwargs):
         'bce': nn.BCELoss,
         'bce_with_logits': nn.BCEWithLogitsLoss,
         'nll': nn.NLLLoss,
-        'focal': FocalLoss
+        'focal': FocalLoss,
+        'mse': nn.MSELoss,
+        'custom': ReconCustomLoss
     }
     
     if loss_name not in supported_losses:
