@@ -21,7 +21,28 @@ class ConvBlock3D(nn.Module):
     def forward(self, x):
         y = self.block(x)
         return y
-    
+
+class UpConvBlock3D(nn.Module):
+    def __init__(self, input_channel, output_channel):
+        super().__init__()
+
+        self.up_conv_block = nn.Sequential(
+            nn.ConvTranspose3d(input_channel,
+                      output_channel,
+                      kernel_size =(1,3,3),
+                      stride=(1,2,2),
+                      padding=(0,1,1),
+                      output_padding=(0,1,1)),
+            nn.Conv3d(output_channel,
+                      output_channel,
+                      kernel_size=(1,3,3),
+                      padding=(0,1,1)),
+            nn.BatchNorm3d(output_channel),
+            nn.ReLU())
+
+    def forward(self, x):
+        y = self.up_conv_block(x)
+        return y
 
 
 class CNN3D(nn.Module):
@@ -76,6 +97,30 @@ class CameraClassifier(nn.Module):
         logit = self.classifier(feat)
 
         return logit
+    
+class CNN3DRecon(nn.Module):
+    def __init__(self, in_channel:int=16, out_channel:int=16):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.encoder = CNN3D(in_channel=in_channel, out_channel=out_channel, temp_pool=1)
+
+        self.decoder = nn.Sequential(
+            UpConvBlock3D(out_channel, out_channel//4),
+            UpConvBlock3D(out_channel//4, out_channel//8),
+            UpConvBlock3D(out_channel//8, 3),
+            nn.ConvTranspose3d(3,3,kernel_size =(1,3,3),
+                                  stride=(1,2,2),
+                                  padding=(0,1,1),
+                                  dilation=(1,5,4),
+                                  output_padding=(0,1,1)),
+            nn.ReLU())
+        
+    def forward(self, x):
+        encoded = self.encoder(x)
+        recon = self.decoder(encoded)
+
+        return recon
 
 
 
