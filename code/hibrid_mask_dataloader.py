@@ -28,7 +28,6 @@ class HybridMaskedVideoIterator:
     
     def __init__(
         self,
-        root_dir: str,
         pipeline,
         input_shape: tuple,
         sequence_length: int,
@@ -41,7 +40,6 @@ class HybridMaskedVideoIterator:
         cover_method: str = "random",
         device_id: int = 0,
     ):
-        self.root_dir = root_dir
         self.input_shape = input_shape
         self.input_height, self.input_width = input_shape
         self.sequence_length = sequence_length
@@ -296,8 +294,7 @@ if __name__ == "__main__":
     trainPipe = video_pipe(file_root=config['trainPath'], train=True, shape=shape,
                         sequence_length=config['seqLen'], stride=config['fstride'], step=config['cstride'],
                         batch_size=config['batch_size'])
-    trainPipe.build()
-
+    
     hybridIter = HybridMaskedVideoIterator(root_dir=config['trainPath'],
                                        pipeline=trainPipe,
                                        input_shape=shape,
