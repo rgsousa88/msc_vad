@@ -99,7 +99,7 @@ class CameraClassifier(nn.Module):
         return logit
     
 class CNN3DRecon(nn.Module):
-    def __init__(self, in_channel:int=16, out_channel:int=16):
+    def __init__(self, in_channel:int=32, out_channel:int=64):
         super().__init__()
         self.in_channel = in_channel
         self.out_channel = out_channel
@@ -113,8 +113,7 @@ class CNN3DRecon(nn.Module):
                                   stride=(1,2,2),
                                   padding=(0,1,1),
                                   dilation=(1,5,4),
-                                  output_padding=(0,1,1)),
-            nn.ReLU())
+                                  output_padding=(0,1,1)))
         
     def forward(self, x):
         encoded = self.encoder(x)
