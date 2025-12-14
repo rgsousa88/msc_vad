@@ -9,13 +9,15 @@ from datetime import datetime
 
 class ReconCustomLoss(nn.Module):
     def __init__(self, reduction='sum'):
-        super().__init()
+        super().__init__()
         self.reduction = reduction
+        self.mse_loss = nn.MSELoss(reduction=reduction)
+        self.l1_loss = nn.L1Loss(reduction=reduction)
     
     def forward(self, input, target):
         batch_size = input.shape[0]
-        loss = (F.mse_loss(F.sigmoid(input), target, reduction=self.reduction)
-                + F.l1_loss(F.sigmoid(input), target, reduction=self.reduction)) / batch_size
+        loss = (self.mse_loss(F.sigmoid(input), target)
+                + self.l1_loss(F.sigmoid(input), target)) / batch_size
         
         return loss
 

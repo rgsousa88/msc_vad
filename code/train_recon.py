@@ -35,7 +35,8 @@ def train(config):
 
     trainPipe = bd.video_pipe(file_root=config['trainPath'], train=True, shape=shape,
                           sequence_length=config['seqLen'], stride=config['fstride'], step=config['cstride'],
-                          batch_size=config['batch_size'])
+                          batch_size=config['batch_size'],
+                          change_color_prob=0.5)
     trainLoader = HybridMaskedVideoIterator(pipeline=trainPipe,
                                             input_shape=shape,
                                             sequence_length=config['seqLen'],
@@ -59,6 +60,13 @@ def train(config):
     model = CNN3DRecon()
     model = model.to(device=device)
 
+    savedModel = config.get('saved_model', None)
+    if savedModel:
+        state_dict = torch.load(savedModel)
+        model.load_state_dict(state_dict['model_state_dict'],strict=False)
+        print(f"Loaded saved model {savedModel}")
+
+
     criterion = get_losses(config['loss'])
     optimizer = get_optmizer(optimizer_name=config['optmizer'], params=model.parameters(), lr=config['lr'])
     
@@ -67,7 +75,7 @@ def train(config):
 
     start_time = time()
     best_val_acc = 0.0
-    MIN_VAL_ACC = 0.50
+    MIN_VAL_ACC = 0.10
     
     for epoch in range(config['num_epochs']):
         tic = time()
