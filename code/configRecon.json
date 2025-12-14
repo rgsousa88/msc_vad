@@ -1,15 +1,17 @@
 {
     "model":"cnn3d_recon",
     "input_size": [120, 214],
+    "in_channel":32,
+    "out_channel":64,
     "seqLen": 11,
     "fstride": 10,
     "cstride": 100,
     "tempPool": 1,
     "lr": 1e-3,
     "optmizer": "adam",
-    "loss": "mse",
+    "loss": "custom",
     "batch_size": 16,
-    "num_epochs": 5,
+    "num_epochs": 50,
     "scheduler": "step",
     "scheduler_param": {"step_size": 10,
                         "t_max": 1000,
@@ -18,6 +20,12 @@
     "dataset": "Shanghai",
     "trainPath": "/mnt/c/dataset/MSC/shangai/train_mp4",
     "valPath": "/mnt/c/dataset/MSC/shangai/val_mp4",
+    "testPath":
+    {
+        "clips":  "/mnt/c/dataset/MSC/shangai/testing/frames",
+        "labels": "/mnt/c/dataset/MSC/shangai/testing/test_frame_mask"
+    },
+    "saved_model":"/home/rgadelha/msc_vad/code/checkpoint/cnn3d_recon_in32out64_20251211_112044.pth",
     "recon_param":
     {
         "square_size":10,
