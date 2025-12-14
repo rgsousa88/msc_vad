@@ -15,7 +15,7 @@ def simple_pipeline(path: str):
     return images, labels.gpu()
 
 @pipeline_def(num_threads=4, enable_conditionals=True, device_id=0)
-def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_length=10, stride=2, step=10, jitter_prob=0.3, initial_pref=512):
+def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_length=10, stride=2, step=10, change_color_prob=0.3, initial_pref=512):
     video, labels = fn.readers.video(device=device,
                                     file_root=file_root,
                                     sequence_length=sequence_length,
@@ -25,17 +25,22 @@ def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_le
                                     initial_fill=initial_pref, name='seq')
     
     video = fn.resize(video.gpu(), size=shape, device=device)
-
+    
     if train:
         mirror = fn.random.choice(2)
-        do_color_jiter = fn.random.coin_flip(probability=jitter_prob, dtype=types.DALIDataType.BOOL)
-        
-        if do_color_jiter:    
-            video = fn.color_twist(video, brightness=0.3, contrast=0.2, saturation=0.4)
     else:
+        change_color_prob = 0.0
         mirror = 0
     
-    video = fn.crop_mirror_normalize(video, dtype=types.FLOAT, std=[255.0], mirror=mirror, output_layout="FHWC")
+    video = fn.crop_mirror_normalize(video, dtype=types.FLOAT, std=[255.0], mirror=mirror, output_layout="FHWC")       
+    
+    do_color_changes = fn.random.coin_flip(probability=change_color_prob, dtype=types.DALIDataType.BOOL)
+
+    if do_color_changes:
+        randBrightness = fn.uniform(range=(0.5,1.5))
+        randContrast = fn.uniform(range=(0.5,1.5))
+        video = fn.brightness_contrast(video, brightness=randBrightness, contrast=randContrast)
+    
     video = fn.transpose(video[1:,:,:,:], perm=[3,0,1,2])
 
     labels = fn.cast(labels, dtype=types.INT64)
