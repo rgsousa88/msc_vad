@@ -253,20 +253,23 @@ if __name__ == "__main__":
         masked_video_cpu = masked_video.cpu().numpy()
         original_video_cpu = original_video.cpu().numpy()
         n_batches = masked_video_cpu.shape[0]
-
+    
         for b in range(n_batches):
             masked_video_np = masked_video_cpu[b]
             original_video_np = original_video_cpu[b]
-
+    
             masked_frames = []
             original_frames = []
             
             for f in range(n_frames_to_show):
                 masked_frame = masked_video_np[:, f, :, :].transpose(1, 2, 0)  # Para H, W, C
                 original_frame = original_video_np[:, f, :, :].transpose(1, 2, 0)
-
-                masked_frames.append(masked_frame)
-                original_frames.append(original_frame)
+    
+                masked_frame = 255.0 * ((masked_frame - masked_frame.min()) / np.ptp(masked_frame))
+                original_frame = 255.0 * ((original_frame - original_frame.min()) / np.ptp(original_frame))
+                
+                masked_frames.append(masked_frame.astype('uint8'))
+                original_frames.append(original_frame.astype('uint8'))
                 
             masked_horizontal = np.concatenate(masked_frames, axis=1)
             original_horizontal = np.concatenate(original_frames, axis=1)
@@ -275,12 +278,12 @@ if __name__ == "__main__":
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(n_frames_to_show * 3, 6))
             
             # Mostrar sequência mascarada
-            ax1.imshow(masked_horizontal)
+            ax1.imshow(masked_horizontal,cmap='gray')
             ax1.set_title(f'Batch {b+1} - Mascarado ({n_frames_to_show} frames)')
             ax1.axis('off')
             
             # Mostrar sequência original
-            ax2.imshow(original_horizontal)
+            ax2.imshow(original_horizontal,cmap='gray')
             ax2.set_title(f'Batch {b+1} - Original ({n_frames_to_show} frames)')
             ax2.axis('off')
             
