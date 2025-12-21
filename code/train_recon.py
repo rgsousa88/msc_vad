@@ -18,6 +18,8 @@ import os
 from trainUtils import *
 from configParser import ConfigParser
 
+from model_factory import ModelFactory
+
 os.environ['DALI_DISABLE_NVML'] = '1'
 
 def recon_accuracy(pred, gt, threshold=1e-2):
@@ -57,7 +59,7 @@ def train(config):
                                         mask_type=recon_config["mask_type"],
                                         mask_prob=0.95)
 
-    model = CNN3DRecon()
+    model = ModelFactory.create_model(config['model'], in_channel=config['in_channel'], out_channel=config['out_channel'])
     model = model.to(device=device)
 
     savedModel = config.get('saved_model', None)
