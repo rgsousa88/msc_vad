@@ -1,11 +1,137 @@
 import torch
 import torch.nn as nn
 
+import numpy as np
+import os
+import math
+
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
+
+import torch
+import math
+from typing import Tuple, Optional, List
+import numpy as np
+
+class MaskGeneratorTorch:
+    def __init__(self, 
+                 height: int, 
+                 width: int, 
+                 percent: float = None, 
+                 num_squares: int = None, 
+                 square_size: int = 10,
+                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+        
+        self.height = height
+        self.width = width
+        self.device = device
+        
+        # Move computations to device
+        self.height_tensor = torch.tensor(height, device=device)
+        self.width_tensor = torch.tensor(width, device=device)
+        
+        self.area = height * width
+        self.square_size = square_size
+        self.square_area = square_size * square_size
+        self.current = 0
+        self.max_retries = 1000
+
+        # Parameter validation and computation
+        if percent is None and num_squares is None:
+            self.percent = 0.30
+            self._compute_squares()
+        elif percent is None and num_squares is not None:
+            self.num_squares = num_squares
+            self._compute_percent()
+        elif percent is not None and num_squares is None:
+            self.percent = percent
+            self._compute_squares()
+        else:
+            self.percent = percent
+            self.num_squares = num_squares
+            self._compute_square_size()
+        
+        self.radius = square_size // 2
+        
+        # Precompute valid ranges
+        self.r_range = torch.arange(self.radius, self.height - self.radius, device=self.device)
+        self.w_range = torch.arange(self.radius, self.width - self.radius, device=self.device)
+
+        self.grid_r, self.grid_w = torch.meshgrid(self.r_range, self.w_range, indexing='ij')
+
+    def _compute_squares(self) -> None:
+        self.covered_area = self.percent * self.area
+        self.num_squares = int(self.covered_area / (self.square_area))
+    
+    def _compute_percent(self) -> None:
+        self.covered_area = self.num_squares * self.square_area
+        self.percent = self.covered_area / self.area
+    
+    def _compute_square_size(self) -> None:
+        self.covered_area = self.percent * self.area
+        self.square_area = self.covered_area / self.num_squares
+        self.square_size = math.floor(math.sqrt(self.square_area))
+        self.radius = self.square_size // 2
+
+    def __reset_indices__(self,):
+        self.indices = self.grid_r * self.width + self.grid_w
+    
+    def get_squares_coords(self,):
+        """
+        Creates r: List(int), c: List(int) coords for one single frame 
+        """
+        #self.__reset_indices__()
+        remaining_squares = self.num_squares
+        #print(f"Num squares {self.num_squares}")
+        pixel_coords_x = []
+        pixel_coords_y = []
+        indices = self.grid_r * self.width_tensor + self.grid_w
+        #print(indices)
+        retries = 0
+
+        while remaining_squares > 0 and retries < self.max_retries:
+            r = torch.randint(self.radius, self.height - self.radius, size=(1,))
+            c = torch.randint(self.radius, self.width - self.radius, size=(1,))
+
+            center_r = r-self.radius
+            center_c = c-self.radius
+            
+            if indices[center_r, center_c] > 0:
+                #print(f"{center_r} {center_c} = {indices[center_r, center_c]}")
+                
+                pixel_coords_x.append(r.cpu().item())
+                pixel_coords_y.append(c.cpu().item())
+
+                r_start = max(0, center_r - 2*self.radius)
+                r_end = min(self.height, center_r + 2*self.radius)
+                c_start = max(0, center_c - 2*self.radius)
+                c_end = min(self.width, center_c + 2*self.radius)
+
+                indices[r_start:r_end, c_start:c_end] = -1
+                remaining_squares-=1
+                #print(f"remaining_squares {remaining_squares}")
+
+            retries+=1
+
+        del indices
+        
+        return pixel_coords_x, pixel_coords_y
+
+    def get_batched_squares_coords(self, n_batch=1, n_frame_per_batch=2):        
+        batch_coords_x = []
+        batch_coords_y = []
+
+        for i in range(n_batch):
+            for j in range(n_frame_per_batch):
+                frame_coords_x, frame_coords_y = self.get_squares_coords()
+                batch_coords_x.append(frame_coords_x)
+                batch_coords_y.append(frame_coords_y)
+        
+        return batch_coords_x, batch_coords_y
+
 
 class HybridMaskedVideoIterator:
     """
-    Iterator híbrido para vídeos que combina:
+    Iterator híbrido para videos que combina:
     1. DALI: carregamento e pré-processamento de vídeos (GPU)
     2. PyTorch: aplicação de máscaras temporais/espaciais
     
@@ -52,10 +178,17 @@ class HybridMaskedVideoIterator:
         self.device_id = device_id
         self.mask_prob = mask_prob
         
-        # Calcular parâmetros de mascaramento
+        # Calcular parÃ¢metros de mascaramento
         self._calculate_mask_parameters()
+
+        self.mask_generator = MaskGeneratorTorch(height=self.input_height, width=self.input_width,
+                                            percent=self.cover_factor, square_size=self.square_size)
         
-        # Construir pipeline DALI para vídeos
+        self.n_squares = self.mask_generator.num_squares
+
+        self.radius = self.square_size // 2
+        
+        # Construir pipeline DALI para ví­deos
         self.pipeline = pipeline
         
         # Build the pipeline
@@ -64,13 +197,13 @@ class HybridMaskedVideoIterator:
         # Criar iterator DALI para PyTorch
         self.dali_iterator = DALIGenericIterator(
             [self.pipeline],
-            output_map=['videos', 'labels'],
+            output_map=['videos'],
             auto_reset=True,
             reader_name='seq'
         )
     
     def _calculate_mask_parameters(self):
-        """Calcula parâmetros para diferentes tipos de máscara."""
+        """Calcula parámetros para diferentes tipos de máscara."""
         
         # Para máscaras espaciais: número de quadrados por frame
         if self.mask_type in ["spatial", "spatiotemporal"]:
@@ -101,12 +234,11 @@ class HybridMaskedVideoIterator:
     def __next__(self):
         """
         Retorna um batch (masked_videos, original_videos, labels).
-        Aplicação da máscara é feita em PyTorch na GPU.
+        Aplicação da máscara feita em PyTorch na GPU.
         """
         # Obter batch do DALI
         dali_output = next(self.dali_iterator)
         original_videos = dali_output[0]['videos']  # Formato: [B, C, F, H, W]
-        labels = dali_output[0]['labels']  # Labels do vídeo
         
         # Clonar batch para versão mascarada
         masked_videos = original_videos.clone()
@@ -114,21 +246,21 @@ class HybridMaskedVideoIterator:
         # Aplicar máscaras usando PyTorch
         self._apply_video_masks_pytorch(masked_videos)
         
-        return masked_videos, original_videos, labels
+        return masked_videos, original_videos
     
     def _apply_video_masks_pytorch(self, videos: torch.Tensor):
         """
         Aplica máscaras a sequências de vídeo usando PyTorch.
         
         Args:
-            videos: Tensor de vídeos [B, C, F, H, W] no GPU
+            videos: Tensor de videos [B, C, F, H, W] no GPU
         """
         batch_size = videos.shape[0]
         n_channels = videos.shape[1]
         n_frames = videos.shape[2]
         
         for b in range(batch_size):
-            # Decidir aleatoriamente se mascara este vídeo (50% chance)
+            # Decidir aleatoriamente se mascara este ví­deo (50% chance)
             if torch.rand(1, device=videos.device).item() > self.mask_prob:
                 continue
             
@@ -145,7 +277,7 @@ class HybridMaskedVideoIterator:
         Aplica máscara temporal (frames inteiros).
         
         Args:
-            video: Tensor de um único vídeo [C, F, H, W]
+            video: Tensor de um única vídeo [C, F, H, W]
             n_frames: Número de frames no vídeo
         """
         # Selecionar frames aleatórios para mascarar
@@ -185,52 +317,57 @@ class HybridMaskedVideoIterator:
             n_channels: Número de canais (geralmente 3)
         """
         # Para cada frame, decidir se aplica máscara espacial
+        # batch_mask_x, batch_mask_y = self.mask_generator.get_batched_squares_coords(n_batch=1, n_frame_per_batch=self.sequence_length)
+        
         for f in range(n_frames):
             # Chance de aplicar máscara neste frame
             if torch.rand(1, device=video.device).item() > self.mask_prob:
                 continue
             
-            # Gerar posições aleatórias para os quadrados neste frame
-            rows = torch.randint(
-                0,
-                self.input_height - self.square_size,
-                (self.n_squares,),
-                device=video.device
-            )
+            # Gerar possíveis aleatórias para os quadrados neste frame
+            # rows = torch.randint(
+            #     0,
+            #     self.input_height - self.square_size,
+            #     (self.n_squares,),
+            #     device=video.device
+            # )
             
-            cols = torch.randint(
-                0,
-                self.input_width - self.square_size,
-                (self.n_squares,),
-                device=video.device
-            )
+            # cols = torch.randint(
+            #     0,
+            #     self.input_width - self.square_size,
+            #     (self.n_squares,),
+            #     device=video.device
+            # )
+            #rows, cols = self.mask_generator.get_squares_coords()
+            #self.mask_generator.reset()
+            batch_mask_x, batch_mask_y = self.mask_generator.get_squares_coords()
             
             # Aplicar cada quadrado
             for i in range(self.n_squares):
-                r, c = rows[i], cols[i]
+                r, c = batch_mask_x[i], batch_mask_y[i]
                 
-                # Determinar valor da máscara
+                # Determinar valor da mÃ¡scara
                 if self.cover_method == "ones":
                     mask_value = 1.0
-                    video[:, f, r:r+self.square_size, c:c+self.square_size] = mask_value
+                    video[:, f, r-self.radius:r+self.radius, c-self.radius:c+self.radius] = mask_value
                 
                 elif self.cover_method == "zeros":
                     mask_value = 0.0
-                    video[:, f, r:r+self.square_size, c:c+self.square_size] = mask_value
+                    video[:, f, r-self.radius:r+self.radius, c-self.radius:c+self.radius] = mask_value
                 
                 elif self.cover_method == "gray":
                     mask_value = 0.5
-                    video[:, f, r:r+self.square_size, c:c+self.square_size] = mask_value
+                    video[:, f, r-self.radius:r+self.radius, c-self.radius:c+self.radius] = mask_value
                 
                 elif self.cover_method == "random":
-                    # Valor aleatório para cada canal
+                    # Valor aleatÃ³rio para cada canal
                     mask_value = torch.rand(
                         n_channels,
                         self.square_size,
                         self.square_size,
                         device=video.device
                     )
-                    video[:, f, r:r+self.square_size, c:c+self.square_size] = mask_value
+                    video[:, f, r-self.radius:r+self.radius, c-self.radius:c+self.radius] = mask_value
     
     def reset(self):
         """Reseta o iterator DALI."""
@@ -253,23 +390,20 @@ if __name__ == "__main__":
         masked_video_cpu = masked_video.cpu().numpy()
         original_video_cpu = original_video.cpu().numpy()
         n_batches = masked_video_cpu.shape[0]
-    
+
         for b in range(n_batches):
             masked_video_np = masked_video_cpu[b]
             original_video_np = original_video_cpu[b]
-    
+
             masked_frames = []
             original_frames = []
             
             for f in range(n_frames_to_show):
                 masked_frame = masked_video_np[:, f, :, :].transpose(1, 2, 0)  # Para H, W, C
                 original_frame = original_video_np[:, f, :, :].transpose(1, 2, 0)
-    
-                masked_frame = 255.0 * ((masked_frame - masked_frame.min()) / np.ptp(masked_frame))
-                original_frame = 255.0 * ((original_frame - original_frame.min()) / np.ptp(original_frame))
-                
-                masked_frames.append(masked_frame.astype('uint8'))
-                original_frames.append(original_frame.astype('uint8'))
+
+                masked_frames.append(masked_frame)
+                original_frames.append(original_frame)
                 
             masked_horizontal = np.concatenate(masked_frames, axis=1)
             original_horizontal = np.concatenate(original_frames, axis=1)
@@ -278,12 +412,12 @@ if __name__ == "__main__":
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(n_frames_to_show * 3, 6))
             
             # Mostrar sequência mascarada
-            ax1.imshow(masked_horizontal,cmap='gray')
+            ax1.imshow(masked_horizontal)
             ax1.set_title(f'Batch {b+1} - Mascarado ({n_frames_to_show} frames)')
             ax1.axis('off')
             
             # Mostrar sequência original
-            ax2.imshow(original_horizontal,cmap='gray')
+            ax2.imshow(original_horizontal)
             ax2.set_title(f'Batch {b+1} - Original ({n_frames_to_show} frames)')
             ax2.axis('off')
             
