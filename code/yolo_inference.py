@@ -15,6 +15,7 @@ class DetectionResult():
             self.y_max = preds[3]
             self.score = preds[4]
             self.class_id = preds[5]
+            self.probs = []
 
         elif isinstance(pred, dict):
             self.x_min = pred['bbox'][0]
@@ -23,6 +24,7 @@ class DetectionResult():
             self.y_max = pred['bbox'][3]
             self.score = pred['confidence']
             self.class_id = pred['class_id']
+            self.probs = pred['probabilities']
         
         else:
             raise ValueError(f"Invalid pred type {type(pred)}")
@@ -232,7 +234,6 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import argparse
     
-
     parser = argparse.ArgumentParser(description="Perform YOLOv5 Object Detection")
     parser.add_argument("--filename", type=str, help="Path to image to be processed")
     parser.add_argument("--use_custom", action="store_true", help="Select custom model to be executed")
