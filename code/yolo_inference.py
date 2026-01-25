@@ -4,6 +4,35 @@ import cv2
 
 import gc
 
+class DetectionResult():
+    def __init__(self, pred): # pred is a tensor
+        if isinstance(pred, torch.Tensor):
+            preds = pred.detach().cpu().numpy()
+
+            self.x_min = preds[0]
+            self.y_min = preds[1]
+            self.x_max = preds[2]
+            self.y_max = preds[3]
+            self.score = preds[4]
+            self.class_id = preds[5]
+
+        elif isinstance(pred, dict):
+            self.x_min = pred['bbox'][0]
+            self.y_min = pred['bbox'][1]
+            self.x_max = pred['bbox'][2]
+            self.y_max = pred['bbox'][3]
+            self.score = pred['confidence']
+            self.class_id = pred['class_id']
+        
+        else:
+            raise ValueError(f"Invalid pred type {type(pred)}")
+    
+    def __str__(self,):
+        msg = f"(x_min,y_min):({self.x_min:.2f},{self.y_min:.2f}) (x_max,y_max):({self.x_max:.2f},{self.y_max:.2f})"
+        msg = f"{msg} score: {self.score:.4f} class_id {self.class_id}"
+
+        return msg
+
 class YOLOInference:
     def __init__(self, model_version:str, model_path:str, conf_threshold:float = 0.5, iou_threshold:float = 0.5, device:str='cuda'):
         self.model_version = model_version
@@ -195,3 +224,49 @@ class YOLOInference:
         gc.collect()
 
         return result
+    
+if __name__ == "__main__":
+    import matplotlib
+    matplotlib.use('TkAgg')
+
+    import matplotlib.pyplot as plt
+    import argparse
+    
+
+    parser = argparse.ArgumentParser(description="Perform YOLOv5 Object Detection")
+    parser.add_argument("--filename", type=str, help="Path to image to be processed")
+    parser.add_argument("--use_custom", action="store_true", help="Select custom model to be executed")
+    args = parser.parse_args()
+
+    filename = args.filename
+    print(f"Filename {filename}")
+
+    use_custom = args.use_custom
+    conf_threshold = 0.80
+    
+    if use_custom:
+        yolov5 = YOLOInference(model_version="yolov5", model_path="yolov5m.pt", conf_threshold=conf_threshold)
+    else:
+        yolov5 = torch.hub.load("ultralytics/yolov5", model='yolov5m', verbose=True, autoshape=True)
+        yolov5.conf = conf_threshold
+
+    img = cv2.imread(filename)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img_copy = img.copy()
+
+    with torch.no_grad():
+        if use_custom:
+            result = yolov5.do_inference(filename)
+        else:
+            result = yolov5(filename).pred[0]
+        
+        for res in result:
+            det_res = DetectionResult(res)
+            print(f"{det_res}")
+            x1, y1, x2, y2 = map(int, (det_res.x_min, det_res.y_min, det_res.x_max, det_res.y_max))
+            P1, P2 = (int(x1),int(y1)), (int(x2),int(y2))
+            print(f"x1,y1 = ({P1}) x2,y2 = ({P2})")
+            img_copy = cv2.rectangle(img_copy, P1, P2, (255,0,0), thickness=4)
+
+    plt.imshow(img_copy)
+    plt.show()
