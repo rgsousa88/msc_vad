@@ -17,6 +17,8 @@ class ModelFactory:
                 - 'CameraClassifier'
                 - 'CNN3DRecon'
                 - 'CNN3DResRecon'
+                - 'CNN3DResReconSkipV1'
+                - 'CNN3DResReconSkipV2'
             **kwargs: Argumentos para o construtor do modelo.
             
         Returns:
@@ -33,6 +35,8 @@ class ModelFactory:
             'CameraClassifier': CameraClassifier,
             'CNN3DRecon': CNN3DRecon,
             'CNN3DResRecon': CNN3DResRecon,
+            'CNN3DResReconSkipV1': CNN3DResReconSkipV1,
+            'CNN3DResReconSkipV2': CNN3DResReconSkipV2,
         }
         
         if model_name not in model_registry:

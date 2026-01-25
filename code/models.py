@@ -161,7 +161,7 @@ class CNN3DRecon(nn.Module):
             nn.ConvTranspose3d(3,3,kernel_size =(1,3,3),
                                   stride=(1,2,2),
                                   padding=(0,1,1),
-                                  dilation=(1,5,4),
+                                  #dilation=(1,5,4),
                                   output_padding=(0,1,1)))
         
     def forward(self, x):
@@ -171,15 +171,36 @@ class CNN3DRecon(nn.Module):
         return recon
 
 class CNN3DResRecon(nn.Module):
-    def __init__(self, in_channel:int=32, out_channel:int=64, skip:bool=False):
+    def __init__(self, in_channel:int=32, out_channel:int=64):
         super().__init__()
         self.in_channel = in_channel
         self.out_channel = out_channel
+        
+        self.encoder = CNN3DRes(in_channel=in_channel, out_channel=out_channel, temp_pool=1)
 
-        if skip:
-            self.encoder = CNN3DResSkip(in_channel=in_channel, out_channel=out_channel, temp_pool=1)
-        else:
-            self.encoder = CNN3DRes(in_channel=in_channel, out_channel=out_channel, temp_pool=1)
+        self.decoder = nn.Sequential(
+            UpConvBlock3D(out_channel, out_channel//4),
+            UpConvBlock3D(out_channel//4, out_channel//8),
+            UpConvBlock3D(out_channel//8, 3),
+            nn.ConvTranspose3d(3,3,kernel_size =(1,3,3),
+                                  stride=(1,2,2),
+                                  padding=(0,1,1),
+                                  #dilation=(1,5,4),
+                                  output_padding=(0,1,1)))
+        
+    def forward(self, x):
+        encoded = self.encoder(x)
+        recon = self.decoder(encoded)
+
+        return recon
+
+class CNN3DResReconSkipV1(nn.Module):
+    def __init__(self, in_channel:int=32, out_channel:int=64):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        
+        self.encoder = CNN3DResSkip(in_channel=in_channel, out_channel=out_channel, temp_pool=1)
 
         self.decoder = nn.Sequential(
             UpConvBlock3D(out_channel, out_channel//4),
@@ -197,7 +218,7 @@ class CNN3DResRecon(nn.Module):
 
         return recon
 
-class CNN3DResRecon2(nn.Module):
+class CNN3DResReconSkipV2(nn.Module):
     def __init__(self, in_channel:int=32, out_channel:int=64):
         super().__init__()
         self.in_channel = in_channel
@@ -206,10 +227,10 @@ class CNN3DResRecon2(nn.Module):
         self.encoder = CNN3DResSkip2(in_channel=in_channel, out_channel=out_channel, temp_pool=1)
 
         self.decoder = nn.Sequential(UpConvBlock3D(in_channel, in_channel//8),
-                                             UpConvBlock3D(in_channel//8, 3),
-                                             nn.Conv3d(3,3,kernel_size=(1,3,3),
-                                                       stride=(1,2,2),
-                                                       padding=(0,1,1)))
+                                     UpConvBlock3D(in_channel//8, 3),
+                                     nn.Conv3d(3,3,kernel_size=(1,3,3),
+                                                   stride=(1,2,2),
+                                                   padding=(0,1,1)))
         
     def forward(self, x):
         encoded = self.encoder(x)
