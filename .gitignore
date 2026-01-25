@@ -11,6 +11,9 @@ __pycache__/
 checkpoints/
 models/
 runs/  # Common directory for training runs
+results/
+*.npz
+*.npy
 
 # C extensions
 *.so
