@@ -3,6 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+import random
+
+SEED = 122344
+torch.manual_seed(SEED)
+random.seed(SEED)
 
 class ConvBlock3D(nn.Module):
     def __init__(self, in_channel=16, out_channel=32):
@@ -50,11 +55,12 @@ class CNN3D(nn.Module):
     Implementation of wide-deep network similar to proposed version on paper 
     Anomaly Detection in Video via Self-Supervised and Multi-Task Learning
     """
-    def __init__(self, in_channel=16, out_channel=32, temp_pool=1):
+    def __init__(self, in_channel=16, out_channel=32, temp_pool=1, last_pool=True):
         super().__init__()
         self.in_channel = in_channel
         self.out_channel = out_channel
         self.temp_pool = temp_pool
+        self.last_pool = last_pool
 
         self.block1 = nn.Sequential(ConvBlock3D(in_channel=3, out_channel=self.in_channel),
                                     ConvBlock3D(in_channel=self.in_channel, out_channel=self.in_channel),
@@ -66,9 +72,12 @@ class CNN3D(nn.Module):
 
         self.block3 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
                                     nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
-
-        self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
+        
+        if last_pool:
+            self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
                                     nn.MaxPool3d(kernel_size=(self.temp_pool,2,2), stride=(self.temp_pool,2,2)))
+        else:
+            self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel))
 
     def forward(self, x):
         y = self.block1(x)
@@ -237,3 +246,130 @@ class CNN3DResReconSkipV2(nn.Module):
         recon = self.decoder(encoded)
 
         return recon
+
+class SSMTLRecon(nn.Module):
+    def __init__(self, in_channel=64, out_channel=3):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+
+        self.block1 = nn.Sequential(nn.Conv2d(in_channels=in_channel, out_channels=in_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.Conv2d(in_channels=in_channel, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+
+        self.block2 = nn.Sequential(nn.Conv2d(in_channels=in_channel//2, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
+                                    nn.Conv2d(in_channels=in_channel//2, out_channels=in_channel//4, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+
+        self.block3 = nn.Sequential(nn.Conv2d(in_channels=in_channel//4, out_channels=in_channel//8, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+
+        self.block4 = nn.Sequential(nn.Conv2d(in_channels=in_channel//8, out_channels=out_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+    
+    def forward(self, x):
+        y = F.interpolate(x, scale_factor=2)
+        y = self.block1(y)
+
+        y = F.interpolate(y, scale_factor=2)
+        y = self.block2(y)
+
+        y = F.interpolate(y, scale_factor=2)
+        y = self.block3(y)
+        
+        y = F.interpolate(y, scale_factor=2)
+        y = self.block4(y)
+
+        return y
+
+
+class SSMTLModel(nn.Module):
+    def __init__(self, in_channel=32, out_channel=64):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+
+        self.backbone = CNN3D(in_channel=in_channel, out_channel=out_channel, last_pool=False)
+        self.pool_distil = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+        self.pool_recon = nn.MaxPool3d(kernel_size=(6,2,2), stride=(6,2,2))
+        self.pool_class = nn.MaxPool3d(kernel_size=(7,2,2), stride=(7,2,2))
+
+        self.arrow_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.MaxPool2d(2,2),
+                                        nn.Flatten(),
+                                        nn.Linear(32,2))
+        
+        self.motion_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.MaxPool2d(2,2),
+                                        nn.Flatten(),
+                                        nn.Linear(32,2))
+        
+        self.distil_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.MaxPool2d(2,2),
+                                        nn.Flatten(),
+                                        nn.Linear(32,1080))
+
+        self.recon_head = SSMTLRecon(in_channel=out_channel)
+    
+    def slice_motion_tensor(self, x):
+        B,C,N,H,W = x.shape
+        middle_idx = N // 2 
+        
+        indices_before = list(range(0, middle_idx))
+        selected_before = random.sample(indices_before, 3)
+
+        indices_after = list(range(middle_idx + 1, N))
+        selected_after = random.sample(indices_after, 3)
+
+        selected_indices = sorted(selected_before + [middle_idx] + selected_after)
+        
+        return x[:, :, selected_indices, :, :]
+    
+    def create_inputs(self, x):
+        B,C,N,H,W = x.shape
+        middle_frame_index = N // 2
+        recon_indices = list(range(1,middle_frame_index)) + list(range(middle_frame_index+1,N-1))
+        recon_indices = sorted(recon_indices)
+
+        x_arrow = x[:,:,1:-1,:,:]
+        x_motion = self.slice_motion_tensor(x)
+        x_recon = x[:,:,recon_indices,:,:]
+        x_distil = x[:,:,middle_frame_index,:,:].reshape(B,C,-1,H,W)
+
+        return x_arrow, x_motion, x_recon, x_distil
+
+    def forward(self, x_arrow, x_motion, x_recon, x_distil):
+        # x -> (B,3,9,H,W)
+        # input_arrow -> (B,3,7,H,W)
+        # input_motion -> (B,3,7,H,W)
+        # input_recon -> (B,3,6,H,W)
+        # input_distil -> (B,3,1,H,W)
+
+        y_arrow = self.backbone(x_arrow)
+        y_arrow = self.pool_class(y_arrow)
+        y_arrow = torch.squeeze(y_arrow, dim=-3)
+
+        y_motion = self.backbone(x_motion)
+        y_motion = self.pool_class(y_motion)
+        y_motion = torch.squeeze(y_motion, dim=-3)
+
+        y_recon = self.backbone(x_recon)
+        y_recon = self.pool_recon(y_recon)
+        y_recon = torch.squeeze(y_recon, dim=-3)
+
+        y_distil = self.backbone(x_distil)
+        y_distil = self.pool_distil(y_distil)
+        y_distil = torch.squeeze(y_distil, dim=-3)
+
+        y_arrow = self.arrow_head(y_arrow)
+        y_motion = self.motion_head(y_motion)
+        y_recon = self.recon_head(y_recon)
+        y_distil = self.distil_head(y_distil)
+
+        return y_arrow, y_motion, y_recon, y_distil
+
+
+
+
+
+
