@@ -310,33 +310,6 @@ class SSMTLModel(nn.Module):
                                         nn.Linear(32,1080))
 
         self.recon_head = SSMTLRecon(in_channel=out_channel)
-    
-    def slice_motion_tensor(self, x):
-        B,C,N,H,W = x.shape
-        middle_idx = N // 2 
-        
-        indices_before = list(range(0, middle_idx))
-        selected_before = random.sample(indices_before, 3)
-
-        indices_after = list(range(middle_idx + 1, N))
-        selected_after = random.sample(indices_after, 3)
-
-        selected_indices = sorted(selected_before + [middle_idx] + selected_after)
-        
-        return x[:, :, selected_indices, :, :]
-    
-    def create_inputs(self, x):
-        B,C,N,H,W = x.shape
-        middle_frame_index = N // 2
-        recon_indices = list(range(1,middle_frame_index)) + list(range(middle_frame_index+1,N-1))
-        recon_indices = sorted(recon_indices)
-
-        x_arrow = x[:,:,1:-1,:,:]
-        x_motion = self.slice_motion_tensor(x)
-        x_recon = x[:,:,recon_indices,:,:]
-        x_distil = x[:,:,middle_frame_index,:,:].reshape(B,C,-1,H,W)
-
-        return x_arrow, x_motion, x_recon, x_distil
 
     def forward(self, x_arrow, x_motion, x_recon, x_distil):
         # x -> (B,3,9,H,W)
