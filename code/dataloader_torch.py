@@ -133,6 +133,12 @@ class SSMTLModelDataset(Dataset):
         self.annotation_path = annotation_path
         self.window = window
         self.num_frames_per_obj = 2 * window + 1
+        self.middle_frame_index = self.num_frames_per_obj // 2
+        self.recon_indices = list(range(1,self.middle_frame_index)) + list(range(self.middle_frame_index+1,self.num_frames_per_obj-1))
+        self.recon_indices = sorted(self.recon_indices)
+        self.indices_before = list(range(0, self.middle_frame_index))
+        self.indices_after = list(range(self.middle_frame_index + 1, self.num_frames_per_obj))
+
         self.input_shape = (input_size, input_size)
         self.col_names = ['resnet_logits','yolo_prob'] + [f"object_{i}" for i in range(self.num_frames_per_obj)]
         self.df_ann = pd.read_csv(annotation_path, sep=';', names=self.col_names)
@@ -159,24 +165,15 @@ class SSMTLModelDataset(Dataset):
         return frame
     
     def slice_motion_tensor(self, x):
-        C,N,H,W = x.shape
-        middle_idx = N // 2 
-        
-        indices_before = list(range(0, middle_idx))
-        selected_before = random.sample(indices_before, 3)
+        selected_before = random.sample(self.indices_before, 3)
+        selected_after = random.sample(self.indices_after, 3)
 
-        indices_after = list(range(middle_idx + 1, N))
-        selected_after = random.sample(indices_after, 3)
-
-        selected_indices = sorted(selected_before + [middle_idx] + selected_after)
+        selected_indices = sorted(selected_before + [self.middle_frame_index] + selected_after)
         
         return x[:, selected_indices, :, :]
     
     def create_inputs(self, x):
         C,N,H,W = x.shape
-        middle_frame_index = N // 2
-        recon_indices = list(range(1,middle_frame_index)) + list(range(middle_frame_index+1,N-1))
-        recon_indices = sorted(recon_indices)
 
         x_arrow = x[:,1:-1,:,:]
         l_arrow = torch.tensor(0, dtype=torch.int64)
@@ -190,8 +187,8 @@ class SSMTLModelDataset(Dataset):
             x_motion = self.slice_motion_tensor(x)
             l_motion = torch.tensor(1, dtype=torch.int64)
         
-        x_recon = x[:,recon_indices,:,:]
-        x_distil = x[:,middle_frame_index,:,:].reshape(C,-1,H,W)
+        x_recon = x[:,self.recon_indices,:,:]
+        x_distil = x[:,self.middle_frame_index,:,:].reshape(C,-1,H,W)
 
         return x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil
     
