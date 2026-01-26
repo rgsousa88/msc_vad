@@ -128,7 +128,7 @@ class ShanghaiTestDataset(Dataset):
         
         return frames, labels.astype('int64')
     
-class SSMTLModelDaset(Dataset):
+class SSMTLModelDataset(Dataset):
     def __init__(self, annotation_path, input_size=64, window=4, transform=None):
         self.annotation_path = annotation_path
         self.window = window
