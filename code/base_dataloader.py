@@ -30,16 +30,17 @@ def video_seq_pipe(file_root, shape=(224,224), train=True, device='gpu', sequenc
         change_color_prob = 0.0
         mirror = 0
     
-    video = fn.crop_mirror_normalize(video, dtype=types.FLOAT, std=[255.0], mirror=mirror, output_layout="FHWC")       
-    
+    video = fn.crop_mirror_normalize(video, dtype=types.FLOAT, std=[255.0], mirror=mirror, output_layout="FHWC")
     do_color_changes = fn.random.coin_flip(probability=change_color_prob, dtype=types.DALIDataType.BOOL)
 
     if do_color_changes:
         randBrightness = fn.uniform(range=(0.5,1.5))
         randContrast = fn.uniform(range=(0.5,1.5))
         video = fn.brightness_contrast(video, brightness=randBrightness, contrast=randContrast)
+    else:
+        video = video
     
-    video = fn.transpose(video[1:,:,:,:], perm=[3,0,1,2])
+    video = fn.transpose(video, perm=[3,0,1,2])
 
     return video
 
@@ -61,8 +62,7 @@ def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_le
         change_color_prob = 0.0
         mirror = 0
     
-    video = fn.crop_mirror_normalize(video, dtype=types.FLOAT, std=[255.0], mirror=mirror, output_layout="FHWC")       
-    
+    video = fn.crop_mirror_normalize(video, dtype=types.FLOAT, std=[255.0], mirror=mirror, output_layout="FHWC")
     do_color_changes = fn.random.coin_flip(probability=change_color_prob, dtype=types.DALIDataType.BOOL)
 
     if do_color_changes:
