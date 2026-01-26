@@ -7,8 +7,11 @@ from torch.utils.data import Dataset
 from torchvision.transforms import v2
 
 import pandas as pd
+import random
 
-torch.manual_seed(122344)
+SEED = 122344
+random.seed(SEED)
+torch.manual_seed(SEED)
 
 class ShanghaiTestSampleDataset(Dataset):
     def __init__(self, video_path, label_path, seqLen=10, cstride=10, fstride=1, transform=None, encoding=True):
@@ -155,6 +158,43 @@ class SSMTLModelDaset(Dataset):
 
         return frame
     
+    def slice_motion_tensor(self, x):
+        C,N,H,W = x.shape
+        middle_idx = N // 2 
+        
+        indices_before = list(range(0, middle_idx))
+        selected_before = random.sample(indices_before, 3)
+
+        indices_after = list(range(middle_idx + 1, N))
+        selected_after = random.sample(indices_after, 3)
+
+        selected_indices = sorted(selected_before + [middle_idx] + selected_after)
+        
+        return x[:, selected_indices, :, :]
+    
+    def create_inputs(self, x):
+        C,N,H,W = x.shape
+        middle_frame_index = N // 2
+        recon_indices = list(range(1,middle_frame_index)) + list(range(middle_frame_index+1,N-1))
+        recon_indices = sorted(recon_indices)
+
+        x_arrow = x[:,1:-1,:,:]
+        l_arrow = torch.tensor(0, dtype=torch.int64)
+        if random.randint(0, 1) == 1: #0 -> forward, 1 -> backward
+            x_arrow = torch.flip(x_arrow, dims=[1])
+            l_arrow = torch.tensor(1, dtype=torch.int64)
+        
+        x_motion = x[:,1:-1,:,:]
+        l_motion = torch.tensor(0, dtype=torch.int64)
+        if random.randint(0, 1) == 1:
+            x_motion = self.slice_motion_tensor(x)
+            l_motion = torch.tensor(1, dtype=torch.int64)
+        
+        x_recon = x[:,recon_indices,:,:]
+        x_distil = x[:,middle_frame_index,:,:].reshape(C,-1,H,W)
+
+        return x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil
+    
     def __getitem__(self, idx):
         items = self.df_ann.iloc[idx]
         resnet_logits = np.load(items[self.col_names[0]])
@@ -164,4 +204,7 @@ class SSMTLModelDaset(Dataset):
         img_crops = torch.stack(img_crops, dim=0)
         img_crops = img_crops.permute(1,0,2,3) #C,F,H,W
 
-        return img_crops, torch.from_numpy(resnet_logits).squeeze(), torch.from_numpy(yolo_probs)
+        feat_distil = torch.cat((torch.from_numpy(resnet_logits).squeeze(), torch.from_numpy(yolo_probs)), dim=0)
+        x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil = self.create_inputs(img_crops)
+
+        return (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil)
