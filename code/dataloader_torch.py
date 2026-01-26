@@ -4,6 +4,9 @@ import cv2
 
 import torch
 from torch.utils.data import Dataset
+from torchvision.transforms import v2
+
+import pandas as pd
 
 torch.manual_seed(122344)
 
@@ -121,3 +124,44 @@ class ShanghaiTestDataset(Dataset):
             frames = frames.permute(1,0,2,3)
         
         return frames, labels.astype('int64')
+    
+class SSMTLModelDaset(Dataset):
+    def __init__(self, annotation_path, input_size=64, window=4, transform=None):
+        self.annotation_path = annotation_path
+        self.window = window
+        self.num_frames_per_obj = 2 * window + 1
+        self.input_shape = (input_size, input_size)
+        self.col_names = ['resnet_logits','yolo_prob'] + [f"object_{i}" for i in range(self.num_frames_per_obj)]
+        self.df_ann = pd.read_csv(annotation_path, sep=';', names=self.col_names)
+
+        self.transform =[]
+        if not transform is None:
+            self.transform.extend(transform)
+        
+        self.transform.extend([v2.Resize(size=self.input_shape, antialias=True),
+                               v2.ToDtype(torch.float32, scale=True),])
+        
+        self.transform = v2.Compose(self.transform)
+
+    def __len__(self,):
+        return len(self.df_ann)
+    
+    def load_and_preprocessing(self, img_path:str):
+        frame = cv2.imread(img_path, 1)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = torch.from_numpy(frame)
+        frame = frame.permute(2,0,1)
+        frame = self.transform(frame)
+
+        return frame
+    
+    def __getitem__(self, idx):
+        items = self.df_ann.iloc[idx]
+        resnet_logits = np.load(items[self.col_names[0]])
+        yolo_probs = np.load(items[self.col_names[1]])
+
+        img_crops = [self.load_and_preprocessing(items[self.col_names[i]]) for i in range(2, len(self.col_names))]
+        img_crops = torch.stack(img_crops, dim=0)
+        img_crops = img_crops.permute(1,0,2,3) #C,F,H,W
+
+        return img_crops, torch.from_numpy(resnet_logits).squeeze(), torch.from_numpy(yolo_probs)
