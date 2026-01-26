@@ -1,0 +1,32 @@
+{
+    "model":"CNN3DRecon",
+    "input_size": [64, 64],
+    "in_channel":32,
+    "out_channel":64,
+    "seqLen": 9,
+    "fstride": 1,
+    "cstride": 9,
+    "tempPool": 1,
+    "lr": 1e-3,
+    "optmizer": "adam",
+    "loss": "custom",
+    "batch_size": 64,
+    "num_epochs": 200,
+    "scheduler": "step",
+    "scheduler_param": {"step_size": 50,
+                        "t_max": 1000,
+                        "eta_min":1e-10},
+    "use_gpu": true,
+    "dataset": "Shanghai",
+    "testPath":
+    {
+        "clips":  "/mnt/c/dataset/MSC/shanghai/test_crop",
+        "labels": "/mnt/c/dataset/MSC/shangai/testing/test_frame_mask"
+    },
+    "saved_model":"",
+    "recon_param":
+    {
+        "square_size":10,
+        "mask_type":"spatial"
+    }
+}
