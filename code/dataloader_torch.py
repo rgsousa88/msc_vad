@@ -129,12 +129,17 @@ class ShanghaiTestDataset(Dataset):
         return frames, labels.astype('int64')
     
 class SSMTLModelDataset(Dataset):
-    def __init__(self, annotation_path, input_size=64, window=4, transform=None):
+    def __init__(self, annotation_path, input_size=64, window=4, transform=None, is_test=False):
         self.annotation_path = annotation_path
+        self.test_mode = is_test
         self.window = window
         self.num_frames_per_obj = 2 * window + 1
         self.middle_frame_index = self.num_frames_per_obj // 2
-        self.recon_indices = list(range(1,self.middle_frame_index)) + list(range(self.middle_frame_index+1,self.num_frames_per_obj-1))
+
+        if not is_test:
+            self.recon_indices = list(range(1,self.middle_frame_index)) + list(range(self.middle_frame_index+1,self.num_frames_per_obj-1))
+        else:
+            self.recon_indices = list(range(self.middle_frame_index)) + list(range(self.middle_frame_index+1,self.num_frames_per_obj))
         self.recon_indices = sorted(self.recon_indices)
         self.indices_before = list(range(0, self.middle_frame_index))
         self.indices_after = list(range(self.middle_frame_index + 1, self.num_frames_per_obj))
@@ -175,17 +180,23 @@ class SSMTLModelDataset(Dataset):
     def create_inputs(self, x):
         C,N,H,W = x.shape
 
-        x_arrow = x[:,1:-1,:,:]
+        x_arrow = x[:,:,:,:]
         l_arrow = torch.tensor(0, dtype=torch.int64)
-        if random.randint(0, 1) == 1: #0 -> forward, 1 -> backward
-            x_arrow = torch.flip(x_arrow, dims=[1])
-            l_arrow = torch.tensor(1, dtype=torch.int64)
-        
-        x_motion = x[:,1:-1,:,:]
+
+        x_motion = x[:,:,:,:]
         l_motion = torch.tensor(0, dtype=torch.int64)
-        if random.randint(0, 1) == 1:
-            x_motion = self.slice_motion_tensor(x)
-            l_motion = torch.tensor(1, dtype=torch.int64)
+
+        if not self.test_mode:
+            x_arrow = x[:,1:-1,:,:]
+            x_motion = x[:,1:-1,:,:]
+
+            if random.randint(0, 1) == 1: #0 -> forward, 1 -> backward
+                x_arrow = torch.flip(x_arrow, dims=[1])
+                l_arrow = torch.tensor(1, dtype=torch.int64)
+
+            if random.randint(0, 1) == 1:
+                x_motion = self.slice_motion_tensor(x)
+                l_motion = torch.tensor(1, dtype=torch.int64)
         
         x_recon = x[:,self.recon_indices,:,:]
         x_distil = x[:,self.middle_frame_index,:,:].reshape(C,-1,H,W)
@@ -203,5 +214,18 @@ class SSMTLModelDataset(Dataset):
 
         feat_distil = torch.cat((torch.from_numpy(resnet_logits).squeeze(), torch.from_numpy(yolo_probs)), dim=0)
         x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil = self.create_inputs(img_crops)
+        
+        if self.test_mode:
+            logit_path = items[self.col_names[0]]
+            dirname = os.path.dirname(os.path.dirname(logit_path))
+            frame_id = os.path.basename(dirname)
+            dirname = os.path.dirname(dirname)
+            sample_id = os.path.basename(dirname)
+            key = f"{sample_id}_{frame_id}"
 
+            return (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil), key
+        
         return (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil)
+
+
+        
