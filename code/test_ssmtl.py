@@ -39,7 +39,7 @@ def extract_metrics(result_raw_dict_path:str, sigma:float=3.5):
         gaussian_filter = gaussian_kernel_1d(sigma=sigma)
 
         for key in result_raw_dict.keys():
-            raw_err = result_raw_dict[key][()]['recon_err']
+            raw_err = result_raw_dict[key][()]['scores']
             label = result_raw_dict[key][()]['labels']
 
             raw_err_torch = torch.from_numpy(raw_err).reshape(1,-1)
@@ -142,45 +142,47 @@ if __name__ == "__main__":
 
     model = load_model(config, device=device)
     
-    result_dir = {}
+    result_dict = {}
     for ann_file in annotation_files:
         print(f"Evaluating {ann_file}")
         sample_id = os.path.basename(ann_file).replace("annotation_",'').replace(".csv",'')
         label_path = os.path.join(config['test_label_path'],f"{sample_id}.npy")
         labels = np.load(label_path)
         result_scores_dict = compute_anomaly_scores(model, ann_file, config, device=device)
-        result_dir[sample_id] = {"scores_per_frame": result_scores_dict, "labels": labels}
-        break
+
+        scores = []
+        frame_idx = []
+        for frame_key in result_scores_dict:
+            frame_scores = result_scores_dict[frame_key]
+            idx = int(frame_key.split('_')[-1])
+            score = np.max(frame_scores).astype('float32')
+            frame_idx.append(idx)
+            scores.append(score)
+        scores = np.array(scores)
+        result_dict[sample_id] = {"scores":scores, "labels":labels[frame_idx]}
 
     del model
     torch.cuda.empty_cache()
     gc.collect()
-
-    for key in result_dir:
-        print(f"Sample {key}")
-        for frame_key in result_dir[key]["scores_per_frame"]:
-            scores = result_dir[key]["scores_per_frame"][frame_key]
-            print(f"Frame {frame_key} Score {max(scores)}")
-        print(f"Labels {result_dir[key]["labels"]}")
     
-    # model_name = os.path.basename(checkpoint).replace('.pth','')
-    # dest_folder = "./results"
-    # if not os.path.exists(dest_folder):
-    #     os.makedirs(dest_folder)
-    # dest_file = os.path.join(dest_folder,f"results_raw_{model_name}.npz")
+    model_name = os.path.basename(checkpoint).replace('.pth','')
+    dest_folder = "./results"
+    if not os.path.exists(dest_folder):
+        os.makedirs(dest_folder)
+    dest_file = os.path.join(dest_folder,f"results_raw_{model_name}.npz")
     
-    # print(f"Saving results from model {model_name} to {dest_file}")
-    # np.savez(dest_file,**result_dir)
+    print(f"Saving results from model {model_name} to {dest_file}")
+    np.savez(dest_file,**result_dict)
 
-    # macro_auc_values = extract_metrics(dest_file)
+    macro_auc_values = extract_metrics(dest_file)
 
-    # mean_auc = 0.0
-    # for key in macro_auc_values.keys():
-    #     macro_auc = macro_auc_values[key]
-    #     mean_auc += macro_auc
+    mean_auc = 0.0
+    for key in macro_auc_values.keys():
+        macro_auc = macro_auc_values[key]
+        mean_auc += macro_auc
 
-    # mean_auc = mean_auc/len(macro_auc_values.keys())
-    # print(f"Mean AUC {mean_auc}")
+    mean_auc = mean_auc/len(macro_auc_values.keys())
+    print(f"Mean AUC {mean_auc}")
 
         
 
