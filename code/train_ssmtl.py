@@ -59,7 +59,7 @@ def train(config):
     loss_recon = nn.L1Loss(reduction='mean')
     loss_distill = nn.L1Loss(reduction='mean')
 
-    optimizer = optim.Adam(lr=0.01, params=model.parameters())
+    optimizer = optim.Adam(lr=0.001, params=model.parameters())
 
     start_time = time()
     best_val_loss = float('inf')
@@ -96,7 +96,7 @@ def train(config):
                 loss.backward()
                 optimizer.step()
 
-                loss_value += loss
+                loss_value += loss.detach().item()
                 n_batches += 1
                 
                 desc = f"Epoch {epoch} Loss {loss_value/n_batches:.4f}"
@@ -136,7 +136,7 @@ def train(config):
                     loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
                     loss += 0.2 * loss_distill(y_distil, feat_distil)
                 
-                loss_value += loss
+                loss_value += loss.detach().item()
                 n_batches += 1
 
                 desc = f"Epoch {epoch} Loss {loss_value/n_batches:.4f}"
