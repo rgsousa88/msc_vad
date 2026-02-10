@@ -254,10 +254,12 @@ class SSMTLRecon(nn.Module):
         self.out_channel = out_channel
 
         self.block1 = nn.Sequential(nn.Conv2d(in_channels=in_channel, out_channels=in_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU(),
                                     nn.Conv2d(in_channels=in_channel, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
                                     nn.ReLU())
 
         self.block2 = nn.Sequential(nn.Conv2d(in_channels=in_channel//2, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU(),
                                     nn.Conv2d(in_channels=in_channel//2, out_channels=in_channel//4, kernel_size=3, stride=1, padding='same'),
                                     nn.ReLU())
 
@@ -295,16 +297,19 @@ class SSMTLModel(nn.Module):
         self.pool_class = nn.MaxPool3d(kernel_size=(7,2,2), stride=(7,2,2))
 
         self.arrow_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.ReLU(),
                                         nn.MaxPool2d(2,2),
                                         nn.Flatten(),
                                         nn.Linear(32,2))
         
         self.motion_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.ReLU(),
                                         nn.MaxPool2d(2,2),
                                         nn.Flatten(),
                                         nn.Linear(32,2))
         
         self.distil_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.ReLU(),
                                         nn.MaxPool2d(2,2),
                                         nn.Flatten(),
                                         nn.Linear(32,1080))
