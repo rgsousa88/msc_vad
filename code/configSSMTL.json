@@ -18,10 +18,11 @@
                         "t_max": 1000,
                         "eta_min":1e-10},
     "use_gpu": true,
+    "workers": 1,
     "dataset": "Shanghai",
     "saved_model": "/home/rgadelha/msc_vad/code/checkpoint/SSMTLModelDataset_in32out64_20260127_005037.pth",
-    "train_ann": "/mnt/c/dataset/MSC/shanghai/train_crop_4/annotation.csv",
-    "val_ann": "/mnt/c/dataset/MSC/shanghai/val_crop_4/annotation.csv",
+    "train_ann": "/mnt/c/dataset/MSC/shanghai/train_crop_4/annotation_train.csv",
+    "val_ann": "/mnt/c/dataset/MSC/shanghai/val_crop_4/annotation_val.csv",
     "test_ann_path": "/mnt/c/dataset/MSC/shanghai/test_crop_3/",
     "test_label_path": "/mnt/c/dataset/MSC/shanghai_base/testing/test_frame_mask/"
 }

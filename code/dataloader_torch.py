@@ -141,7 +141,7 @@ class SSMTLModelDataset(Dataset):
         else:
             self.recon_indices = list(range(self.middle_frame_index)) + list(range(self.middle_frame_index+1,self.num_frames_per_obj))
         self.recon_indices = sorted(self.recon_indices)
-        self.indices_before = list(range(0, self.middle_frame_index))
+        self.indices_before = list(range(self.middle_frame_index))
         self.indices_after = list(range(self.middle_frame_index + 1, self.num_frames_per_obj))
 
         self.input_shape = (input_size, input_size)
@@ -195,26 +195,71 @@ class SSMTLModelDataset(Dataset):
                 l_arrow = torch.tensor(1, dtype=torch.int64)
 
             if random.randint(0, 1) == 1:
-                x_motion = self.slice_motion_tensor(x)
+                x_motion = self.create_motion_irregular_central_gaps(x)
                 l_motion = torch.tensor(1, dtype=torch.int64)
         
         x_recon = x[:,self.recon_indices,:,:]
-        x_distil = x[:,self.middle_frame_index,:,:].reshape(C,-1,H,W)
+        x_distil = x[:,self.middle_frame_index,:,:].unsqueeze(1)
 
         return x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil
     
+    def create_motion_irregular_central_gaps(self, x):
+        C, N, H, W = x.shape
+        middle_idx = self.middle_frame_index
+        
+        # Gerar gaps para frames anteriores (todos em relação ao central)
+        gaps_before = [random.randint(1, 4) for _ in range(3)]
+        frames_before = [middle_idx - gap for gap in gaps_before]
+        
+        # Gerar gaps para frames posteriores (todos em relação ao central)
+        gaps_after = [random.randint(1, 4) for _ in range(3)]
+        frames_after = [middle_idx + gap for gap in gaps_after]
+        
+        # Combinar todos os frames
+        selected = frames_before + [middle_idx] + frames_after
+        
+        # Filtrar índices válidos (dentro de 0 a N-1)
+        selected = [idx for idx in selected if 0 <= idx < N]
+        
+        # Se não temos 7 frames, complementar com os mais próximos do centro
+        if len(selected) < 7:
+            all_indices = set(range(N))
+            missing = 7 - len(selected)
+            remaining = sorted(all_indices - set(selected), 
+                            key=lambda i: abs(i - middle_idx))
+            selected.extend(remaining[:missing])
+        
+        # Ordenar temporalmente
+        selected = sorted(selected)
+        
+        # Garantir exatamente 7 frames
+        selected = selected[:7]
+        
+        return x[:, selected, :, :]
+    
     def __getitem__(self, idx):
         items = self.df_ann.iloc[idx]
+        #print(f"Item {items[self.col_names[0]]}")
         resnet_logits = np.load(items[self.col_names[0]])
         yolo_probs = np.load(items[self.col_names[1]])
+
+        #print(f"Resnet {resnet_logits.shape}")
+        #print(f"YOLO {yolo_probs.shape}")
 
         img_crops = [self.load_and_preprocessing(items[self.col_names[i]]) for i in range(2, len(self.col_names))]
         img_crops = torch.stack(img_crops, dim=0)
         img_crops = img_crops.permute(1,0,2,3) #C,F,H,W
 
+        #print(f"Img crops {img_crops.shape}")
+
         feat_distil = torch.cat((torch.from_numpy(resnet_logits).squeeze(), torch.from_numpy(yolo_probs)), dim=0)
         x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil = self.create_inputs(img_crops)
         
+        #print(f"x_arrow {x_arrow.shape} l_arrow {l_arrow}")
+        #print(f"x_motion {x_motion.shape} l_motion {l_motion}")
+        #print(f"x_recon {x_recon.shape}")
+        #print(f"x_distil {x_distil.shape}")
+
         if self.test_mode:
             logit_path = items[self.col_names[0]]
             dirname = os.path.dirname(os.path.dirname(logit_path))
@@ -226,6 +271,3 @@ class SSMTLModelDataset(Dataset):
             return (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil), key
         
         return (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil)
-
-
-        

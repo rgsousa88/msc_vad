@@ -70,20 +70,25 @@ class CNN3D(nn.Module):
                                     ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
                                     nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
 
+        # self.block3 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
+        #                             nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
+        
+        # if last_pool:
+        #     self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
+        #                             nn.MaxPool3d(kernel_size=(self.temp_pool,2,2), stride=(self.temp_pool,2,2)))
+        # else:
+        #     self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel))
+
         self.block3 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
+                                    ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
                                     nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
         
-        if last_pool:
-            self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
-                                    nn.MaxPool3d(kernel_size=(self.temp_pool,2,2), stride=(self.temp_pool,2,2)))
-        else:
-            self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel))
 
     def forward(self, x):
         y = self.block1(x)
         y = self.block2(y)
         y = self.block3(y)
-        y = self.block4(y)
+        #y = self.block4(y)
 
         return y
 
@@ -326,22 +331,30 @@ class SSMTLModel(nn.Module):
         y_arrow = self.backbone(x_arrow)
         y_arrow = self.pool_class(y_arrow)
         y_arrow = torch.squeeze(y_arrow, dim=-3)
+        y_arrow = self.arrow_head(y_arrow)
+
+        del x_arrow
+        torch.cuda.empty_cache()
 
         y_motion = self.backbone(x_motion)
         y_motion = self.pool_class(y_motion)
         y_motion = torch.squeeze(y_motion, dim=-3)
+        y_motion = self.motion_head(y_motion)
+
+        del x_motion
+        torch.cuda.empty_cache()
 
         y_recon = self.backbone(x_recon)
         y_recon = self.pool_recon(y_recon)
         y_recon = torch.squeeze(y_recon, dim=-3)
+        y_recon = self.recon_head(y_recon)
+
+        del x_recon
+        torch.cuda.empty_cache()
 
         y_distil = self.backbone(x_distil)
         y_distil = self.pool_distil(y_distil)
-        y_distil = torch.squeeze(y_distil, dim=-3)
-
-        y_arrow = self.arrow_head(y_arrow)
-        y_motion = self.motion_head(y_motion)
-        y_recon = self.recon_head(y_recon)
+        y_distil = torch.squeeze(y_distil, dim=-3)        
         y_distil = self.distil_head(y_distil)
 
         return y_arrow, y_motion, y_recon, y_distil

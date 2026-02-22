@@ -5,6 +5,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2
+from torch.cuda.amp import autocast, GradScaler
 
 import numpy as np
 
@@ -20,38 +21,62 @@ import os
 from trainUtils import *
 from configParser import ConfigParser
 
-from model_factory import ModelFactory
 
 os.environ['DALI_DISABLE_NVML'] = '1'
 
 
 def train(config):
+    torch.backends.cudnn.benchmark = True  # Auto-tune para hardware específico
+    torch.backends.cudnn.deterministic = False  # Permitir otimizações
+    torch.backends.cuda.matmul.allow_tf32 = True  # Usar TF32 na RTX 40
+    torch.backends.cudnn.allow_tf32 = True
+
     device = set_device(use_gpu=config['use_gpu'])
+    scaler = GradScaler()
 
-    transfTrain = [v2.ColorJitter(brightness=.5, contrast=.5, hue=.3),
-                   v2.RandomHorizontalFlip(p=0.5)]
+    # transfTrain = [v2.ColorJitter(brightness=.5, contrast=.5, hue=.3),
+    #                v2.RandomHorizontalFlip(p=0.5)]
 
-    trainDataset = SSMTLModelDataset(annotation_path=config['trainAnn'],
+    trainDataset = SSMTLModelDataset(annotation_path=config['train_ann'],
                                      input_size=config['input_size'],
                                      window=config['window'],
-                                     transform=transfTrain)
+                                     transform=None)
     
-    trainLoader = DataLoader(trainDataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+    trainLoader = DataLoader(trainDataset,
+                             batch_size=config['batch_size'],
+                             shuffle=True,
+                             num_workers=config['workers'],
+                             prefetch_factor=4,  # Pré-carregar 4 batches
+                             persistent_workers=True,  # Manter workers vivos entre épocas
+                             pin_memory=True,  # Acelera transferência CPU->GPU
+                             pin_memory_device='cuda',  # Direto para GPU
+                             drop_last=True)
 
 
-    valDataset = SSMTLModelDataset(annotation_path=config['valAnn'],
+    valDataset = SSMTLModelDataset(annotation_path=config['val_ann'],
                                   input_size=config['input_size'],
                                   window=config['window'])
     
-    valLoader = DataLoader(valDataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+    valLoader = DataLoader(valDataset,
+                           batch_size=config['batch_size'],
+                           shuffle=True,
+                           num_workers=config['workers'],
+                           prefetch_factor=4,  # Pré-carregar 4 batches
+                           persistent_workers=True,  # Manter workers vivos entre épocas
+                           pin_memory=True,  # Acelera transferência CPU->GPU
+                           pin_memory_device='cuda',  # Direto para GPU
+                           drop_last=True)
 
     model = SSMTLModel(in_channel=config['in_channel'], out_channel=config['out_channel'])
     model = model.to(device=device)
 
+    model = torch.compile(model, mode='reduce-overhead',
+                          backend='inductor')
+
     savedModel = config.get('saved_model', None)
     if savedModel:
         state_dict = torch.load(savedModel)
-        model.load_state_dict(state_dict['model_state_dict'], strict=True)
+        model.load_state_dict(state_dict['model_state_dict'], strict=False)
         print(f"Loaded saved model {savedModel}")
 
     loss_arrow = nn.CrossEntropyLoss()
@@ -74,39 +99,49 @@ def train(config):
 
         model.train()
         for batch in t_train:
-            try:
-                (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil) = batch
-                
-                x_arrow = x_arrow.to(device)
-                l_arrow = l_arrow.to(device)
-                x_motion = x_motion.to(device)
-                l_motion = l_motion.to(device)
-                x_recon = x_recon.to(device)
-                x_distil = x_distil.to(device)
-                feat_distil = feat_distil.to(device)
+            with autocast(dtype=torch.float16): 
+                try:
+                    (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil) = batch
+                    
+                    x_arrow = x_arrow.to(device, non_blocking=True)
+                    l_arrow = l_arrow.to(device, non_blocking=True)
+                    x_motion = x_motion.to(device, non_blocking=True)
+                    l_motion = l_motion.to(device, non_blocking=True)
+                    x_recon = x_recon.to(device, non_blocking=True)
+                    x_distil = x_distil.to(device, non_blocking=True)
+                    feat_distil = feat_distil.to(device, non_blocking=True)
 
-                y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
+                    y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
 
-                loss = loss_arrow(y_arrow, l_arrow)
-                loss += loss_motion(y_motion, l_motion)
-                loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
-                loss += 0.2 * loss_distill(y_distil, feat_distil)
+                    loss = loss_arrow(y_arrow, l_arrow)
+                    loss += loss_motion(y_motion, l_motion)
+                    loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
+                    loss += 0.2 * loss_distill(y_distil, feat_distil)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    # optimizer.zero_grad()
+                    # loss.backward()
+                    # optimizer.step()
 
-                loss_value += loss.detach().item()
-                n_batches += 1
-                
-                desc = f"Epoch {epoch} Loss {loss_value/n_batches:.4f}"
-                desc = f"{desc} Elapsed Time {time()-tic:.3f}"
-                
-                t_train.set_description(desc)
+                    # Backward com escala para FP16
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
 
-            except Exception as e:
-                print(e)
-                return
+                    del x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil
+                    del y_arrow, y_motion, y_recon, y_distil
+
+                    loss_value += loss.detach().item()
+                    n_batches += 1
+                    
+                    desc = f"Epoch {epoch} Loss {loss_value/n_batches:.4f}"
+                    desc = f"{desc} Elapsed Time {time()-tic:.3f}"
+                    
+                    t_train.set_description(desc)
+
+                except Exception as e:
+                    print(e)
+                    return
         
         train_loss = loss_value / n_batches
         
