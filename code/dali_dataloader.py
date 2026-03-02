@@ -125,11 +125,13 @@ def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, devi
     *jpegs, resnet, yolo, motion_idx = fn.external_source(source=ExternalInputIterator(csv_file=ann_file, batch_size=batch_size),
                                num_outputs=num_frames+3,
                                batch=False)
+    
     images = fn.decoders.image(jpegs, device="mixed")
     
     sequence = fn.resize(images, size=shape, device=device)
     sequence = fn.stack(*sequence)
     sequence = fn.reshape(sequence, layout="FHWC")
+    sequence = fn.crop_mirror_normalize(sequence, dtype=types.FLOAT, std=[255.0], output_layout="FHWC")
 
     if train:
         arrow_prob = 0.5
@@ -152,21 +154,27 @@ def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, devi
         seq_backward = sequence
         seq_motion = sequence
 
-    label_backward = fn.zeros(shape=1)
+    label_backward = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
 
     if do_backward:
         seq_backward = fn.flip(seq_backward, depthwise=1, horizontal=0, vertical=0)
-        label_backward = fn.ones(shape=1)
+        label_backward = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
     
-    label_sequence = fn.zeros(shape=1)
+    label_sequence = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
 
     if do_motion:
         idx = fn.random.choice(15)
         seq_motion = fn.sequence_rearrange(sequence, new_order=motion_idx[idx])
-        label_sequence = fn.ones(shape=1)
+        label_sequence = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
     
     seq_recon = fn.sequence_rearrange(sequence, new_order=recon_idx)
-    seq_distill = sequence[middle_frame,:]
+    seq_distill = sequence[middle_frame,:] #(H,W,C)
+    seq_distill = fn.expand_dims(seq_distill, axes=[0], new_axis_names="F")
+
+    seq_backward = fn.transpose(seq_backward, perm=[3,0,1,2]) #FHWC (0,1,2,3) -> CFHW (3,0,1,2)
+    seq_motion = fn.transpose(seq_motion, perm=[3,0,1,2])
+    seq_recon = fn.transpose(seq_recon, perm=[3,0,1,2])
+    seq_distill = fn.transpose(seq_distill, perm=[3,0,1,2])
 
     features = fn.cat(resnet, yolo, axis=0)
 

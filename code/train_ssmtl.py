@@ -5,12 +5,14 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2
-from torch.cuda.amp import autocast, GradScaler
 
 import numpy as np
 
 from dataloader_torch import SSMTLModelDataset
 from models import SSMTLModel
+
+from dali_dataloader import ssmtl_pipe
+from nvidia.dali.plugin.pytorch import DALIRaggedIterator
 
 from time import time
 from tqdm import tqdm
@@ -24,19 +26,11 @@ from configParser import ConfigParser
 
 os.environ['DALI_DISABLE_NVML'] = '1'
 
+torch.backends.cudnn.benchmark = True  # Auto-tune para hardware específico
+torch.backends.cuda.matmul.allow_tf32 = True  # Usar TF32 na RTX 40
+torch.backends.cudnn.allow_tf32 = True
 
-def train(config):
-    torch.backends.cudnn.benchmark = True  # Auto-tune para hardware específico
-    torch.backends.cudnn.deterministic = False  # Permitir otimizações
-    torch.backends.cuda.matmul.allow_tf32 = True  # Usar TF32 na RTX 40
-    torch.backends.cudnn.allow_tf32 = True
-
-    device = set_device(use_gpu=config['use_gpu'])
-    scaler = GradScaler()
-
-    # transfTrain = [v2.ColorJitter(brightness=.5, contrast=.5, hue=.3),
-    #                v2.RandomHorizontalFlip(p=0.5)]
-
+def create_torch_loaders(config, prefetch_factor=4):
     trainDataset = SSMTLModelDataset(annotation_path=config['train_ann'],
                                      input_size=config['input_size'],
                                      window=config['window'],
@@ -46,7 +40,7 @@ def train(config):
                              batch_size=config['batch_size'],
                              shuffle=True,
                              num_workers=config['workers'],
-                             prefetch_factor=4,  # Pré-carregar 4 batches
+                             prefetch_factor=prefetch_factor,  # Pré-carregar 4 batches
                              persistent_workers=True,  # Manter workers vivos entre épocas
                              pin_memory=True,  # Acelera transferência CPU->GPU
                              pin_memory_device='cuda',  # Direto para GPU
@@ -61,17 +55,46 @@ def train(config):
                            batch_size=config['batch_size'],
                            shuffle=True,
                            num_workers=config['workers'],
-                           prefetch_factor=4,  # Pré-carregar 4 batches
+                           prefetch_factor=prefetch_factor,  # Pré-carregar 4 batches
                            persistent_workers=True,  # Manter workers vivos entre épocas
                            pin_memory=True,  # Acelera transferência CPU->GPU
                            pin_memory_device='cuda',  # Direto para GPU
                            drop_last=True)
+    
+    return trainLoader, valLoader
+
+def create_dali_loaders(config):   
+    returnNames = ['x_arrow', 'l_arrow', 'x_motion', 'l_motion', 'x_recon', 'x_distil', 'feat_distil']
+
+    train_pipe = ssmtl_pipe(ann_file=config['train_ann'],
+                            num_frames=9,
+                            batch_size=config['batch_size'],
+                            num_threads=config['workers'],
+                            train=True)
+    
+    val_pipe = ssmtl_pipe(ann_file=config['val_ann'],
+                          num_frames=9,
+                          batch_size=config['batch_size'],
+                          num_threads=config['workers'],
+                          train=True)
+    
+    train_pipe.build()
+    train_iter = DALIRaggedIterator(train_pipe, returnNames, size=-1)
+    
+    val_pipe.build()
+    val_iter = DALIRaggedIterator(val_pipe, returnNames, size=-1)
+
+    return train_iter, val_iter
+
+def train(config):
+    device = set_device(use_gpu=config['use_gpu'])
+
+    # transfTrain = [v2.ColorJitter(brightness=.5, contrast=.5, hue=.3),
+    #                v2.RandomHorizontalFlip(p=0.5)]
+    trainLoader, valLoader = create_dali_loaders(config)
 
     model = SSMTLModel(in_channel=config['in_channel'], out_channel=config['out_channel'])
     model = model.to(device=device)
-
-    model = torch.compile(model, mode='reduce-overhead',
-                          backend='inductor')
 
     savedModel = config.get('saved_model', None)
     if savedModel:
@@ -99,49 +122,31 @@ def train(config):
 
         model.train()
         for batch in t_train:
-            with autocast(dtype=torch.float16): 
-                try:
-                    (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil) = batch
-                    
-                    x_arrow = x_arrow.to(device, non_blocking=True)
-                    l_arrow = l_arrow.to(device, non_blocking=True)
-                    x_motion = x_motion.to(device, non_blocking=True)
-                    l_motion = l_motion.to(device, non_blocking=True)
-                    x_recon = x_recon.to(device, non_blocking=True)
-                    x_distil = x_distil.to(device, non_blocking=True)
-                    feat_distil = feat_distil.to(device, non_blocking=True)
+            try:
+                x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil = batch[0]['x_arrow'], batch[0]['l_arrow'], batch[0]['x_motion'], batch[0]['l_motion'], batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
 
-                    y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
+                y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
 
-                    loss = loss_arrow(y_arrow, l_arrow)
-                    loss += loss_motion(y_motion, l_motion)
-                    loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
-                    loss += 0.2 * loss_distill(y_distil, feat_distil)
+                loss = loss_arrow(y_arrow, l_arrow.squeeze())
+                loss += loss_motion(y_motion, l_motion.squeeze())
+                loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
+                loss += 0.2 * loss_distill(y_distil, feat_distil)
 
-                    # optimizer.zero_grad()
-                    # loss.backward()
-                    # optimizer.step()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-                    # Backward com escala para FP16
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad(set_to_none=True)
+                loss_value += loss.detach().item()
+                n_batches += 1
+                
+                desc = f"Epoch {epoch} Loss {loss_value/n_batches:.4f}"
+                desc = f"{desc} Elapsed Time {time()-tic:.3f}"
+                
+                t_train.set_description(desc)
 
-                    del x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil
-                    del y_arrow, y_motion, y_recon, y_distil
-
-                    loss_value += loss.detach().item()
-                    n_batches += 1
-                    
-                    desc = f"Epoch {epoch} Loss {loss_value/n_batches:.4f}"
-                    desc = f"{desc} Elapsed Time {time()-tic:.3f}"
-                    
-                    t_train.set_description(desc)
-
-                except Exception as e:
-                    print(e)
-                    return
+            except Exception as e:
+                print(f"Exception {e}")
+                return
         
         train_loss = loss_value / n_batches
         
@@ -154,20 +159,12 @@ def train(config):
         for batch in t_val:
             try:
                 with torch.no_grad():
-                    (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil) = batch
-
-                    x_arrow = x_arrow.to(device)
-                    l_arrow = l_arrow.to(device)
-                    x_motion = x_motion.to(device)
-                    l_motion = l_motion.to(device)
-                    x_recon = x_recon.to(device)
-                    x_distil = x_distil.to(device)
-                    feat_distil = feat_distil.to(device)
+                    x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil = batch[0]['x_arrow'], batch[0]['l_arrow'], batch[0]['x_motion'], batch[0]['l_motion'], batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
 
                     y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
                     
-                    loss = loss_arrow(y_arrow, l_arrow)
-                    loss += loss_motion(y_motion, l_motion)
+                    loss = loss_arrow(y_arrow, l_arrow.squeeze())
+                    loss += loss_motion(y_motion, l_motion.squeeze())
                     loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
                     loss += 0.2 * loss_distill(y_distil, feat_distil)
                 
