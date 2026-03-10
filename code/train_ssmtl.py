@@ -5,6 +5,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2
+from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
 
@@ -107,10 +108,15 @@ def train(config):
     loss_recon = nn.L1Loss(reduction='mean')
     loss_distill = nn.L1Loss(reduction='mean')
 
-    optimizer = optim.Adam(lr=0.001, params=model.parameters())
+    optimizer = optim.Adam(lr=0.005, params=model.parameters())
+
+    scheduler_config = config.get('scheduler_param', {})
+    scheduler = get_scheduler(config['scheduler'], optimizer=optimizer, **scheduler_config)
 
     start_time = time()
     best_val_loss = float('inf')
+
+    writer = SummaryWriter(log_dir=f"runs/ssmtl_{int(time())}")
     
     for epoch in range(config['num_epochs']):
         tic = time()
@@ -126,6 +132,7 @@ def train(config):
                 x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil = batch[0]['x_arrow'], batch[0]['l_arrow'], batch[0]['x_motion'], batch[0]['l_motion'], batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
 
                 y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
+                #y_arrow, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
 
                 loss = loss_arrow(y_arrow, l_arrow.squeeze())
                 loss += loss_motion(y_motion, l_motion.squeeze())
@@ -148,6 +155,7 @@ def train(config):
                 print(f"Exception {e}")
                 return
         
+        scheduler.step()
         train_loss = loss_value / n_batches
         
         loss_value = 0.0
@@ -162,6 +170,7 @@ def train(config):
                     x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil = batch[0]['x_arrow'], batch[0]['l_arrow'], batch[0]['x_motion'], batch[0]['l_motion'], batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
 
                     y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
+                    #y_arrow, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
                     
                     loss = loss_arrow(y_arrow, l_arrow.squeeze())
                     loss += loss_motion(y_motion, l_motion.squeeze())
@@ -182,6 +191,10 @@ def train(config):
         
         val_loss = loss_value / n_batches
 
+        # Tensorboard logging
+        writer.add_scalar("Loss/train", train_loss, epoch)
+        writer.add_scalar("Loss/val", val_loss, epoch)
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             saveModel(config=config, model=model, epoch=epoch, val_loss=val_loss, val_acc=0.0)
@@ -190,6 +203,7 @@ def train(config):
         print(f"Epoch {epoch} LR {optimizer.param_groups[0]['lr']:.4f} {epochReport}")
         print(f"Elapsed Time {time() - start_time:.4f}")
 
+    writer.close()
     print(f"Total time {time() - start_time:.4f}")
 
 if __name__ == "__main__":
