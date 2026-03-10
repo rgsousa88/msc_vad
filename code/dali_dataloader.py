@@ -78,25 +78,83 @@ def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_le
     return video, labels.gpu()
 
 import csv
-from random import shuffle
+import random
 import numpy as np
+import os
+import struct
 
 @do_not_convert
 class ExternalInputIterator(object):
-    def __init__(self, batch_size, csv_file):
+    def __init__(self, batch_size, csv_file, seq_len=7):
         self.batch_size = batch_size
         self.files = []
         with open(csv_file, 'r') as f:
             for row in csv.reader(f, delimiter=';'):
                 if row:
                     self.files.append(row)
-        shuffle(self.files)
+        random.shuffle(self.files)
         self.full_iterations = len(self.files) // self.batch_size
+        self.seq_len = seq_len
+        self.p = 0.5
+        self.indices = [i for i in range(self.seq_len)]
 
-        self.motion_idx = [[0,1,3,4,5,6,8],[0,1,3,4,5,7,8],[0,1,3,4,5,6,7],[0,1,3,4,6,7,8],
-                           [0,2,3,4,5,6,8],[0,2,3,4,5,7,8],[0,2,3,4,5,6,7],[0,2,3,4,6,7,8],
-                           [1,2,3,4,5,7,8],[1,2,3,4,5,6,8],[0,2,3,4,6,7,8],
-                           [0,1,2,4,5,6,8],[0,1,2,4,5,7,8],[0,1,2,4,5,6,7],[0,1,2,4,6,7,8]]
+        # self.motion_idx = [[0,1,3,4,5,6,8],[0,1,3,4,5,7,8],[0,1,3,4,5,6,7],[0,1,3,4,6,7,8],
+        #                    [0,2,3,4,5,6,8],[0,2,3,4,5,7,8],[0,2,3,4,5,6,7],[0,2,3,4,6,7,8],
+        #                    [1,2,3,4,5,7,8],[1,2,3,4,5,6,8],[0,2,3,4,6,7,8],
+        #                    [0,1,2,4,5,6,8],[0,1,2,4,5,7,8],[0,1,2,4,5,6,7],[0,1,2,4,6,7,8]]
+
+        # self.motion_idx = [[0,1,3,4,5,6,8],[0,1,3,4,5,7,8],[0,1,3,4,6,7,8],
+        #                    [0,2,3,4,5,6,8],[0,2,3,4,5,7,8],[0,2,3,4,6,7,8],
+        #                    [0,1,2,4,5,6,8],[0,1,2,4,5,7,8],[0,1,2,4,6,7,8]]
+        
+    def irregular_shuffle(self, indices):
+        new_indices = indices
+        i = random.randint(0, self.seq_len-2)
+        new_indices[i], new_indices[i+1] = new_indices[i+1], new_indices[i]
+
+        return new_indices
+    
+    def irregular_duplicate(self, indices):
+        new_indices = indices
+        i = random.randint(1, self.seq_len-2)
+        new_indices[i] = new_indices[i-1]
+
+        return new_indices
+    
+    def irregular_timewarp(self,):
+        indices = sorted(random.sample(range(self.seq_len), self.seq_len))
+        # cria leve distorção temporal
+        indices[random.randint(1,self.seq_len-2)] += random.choice([-1,1])
+        indices = [max(0, min(self.seq_len-1, i)) for i in indices]
+
+        return indices
+    
+    def create_motion_sample(self,):
+        method = random.choice(["shuffle","duplicate","warp"])
+        if method == "shuffle":
+            indices = self.irregular_shuffle(indices=self.indices)
+
+        elif method == "duplicate":
+            indices = self.irregular_duplicate(indices=self.indices)
+
+        else:
+            indices = self.irregular_timewarp()
+
+        return indices
+    
+    def get_key_prefix_encode(self, resnet_row):
+        dirname = os.path.dirname(os.path.dirname(resnet_row))
+        frame_id = os.path.basename(dirname)
+        dirname = os.path.dirname(dirname)
+        sample_id = os.path.basename(dirname)
+        key = f"{sample_id}_{frame_id}".encode('utf-8')
+        length_prefix = struct.pack('<i', len(key))
+        final_payload = length_prefix + key
+        enc = np.frombuffer(final_payload, dtype=np.int8)
+        enc_prefix = np.frombuffer(length_prefix, dtype=np.int8)
+
+        return enc, enc_prefix
+
 
     def __call__(self, sample_info):
         sample_idx = sample_info.idx_in_epoch
@@ -116,14 +174,18 @@ class ExternalInputIterator(object):
         
         batch.append(resnet)
         batch.append(yolo)
-        batch.append(np.array(self.motion_idx).astype(np.int32))
+        batch.append(np.array(self.create_motion_sample()).astype(np.int32))
+
+        key, prefix = self.get_key_prefix_encode(row[0])
+        batch.append(key)
+        batch.append(prefix)
 
         return batch
 
 @pipeline_def(num_threads=4, enable_conditionals=True, device_id=0, batch_size=4)
 def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, device='gpu', arrow_prob=0.5, motion_prob=0.5):
-    *jpegs, resnet, yolo, motion_idx = fn.external_source(source=ExternalInputIterator(csv_file=ann_file, batch_size=batch_size),
-                               num_outputs=num_frames+3,
+    *jpegs, resnet, yolo, motion_idx, key, prefix = fn.external_source(source=ExternalInputIterator(csv_file=ann_file, batch_size=batch_size),
+                               num_outputs=num_frames+5,
                                batch=False)
     
     images = fn.decoders.image(jpegs, device="mixed")
@@ -157,14 +219,14 @@ def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, devi
     label_backward = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
 
     if do_backward:
-        seq_backward = fn.flip(seq_backward, depthwise=1, horizontal=0, vertical=0)
+        seq_backward = seq_backward[::-1,:,:,:]
         label_backward = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
     
     label_sequence = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
 
     if do_motion:
-        idx = fn.random.choice(15)
-        seq_motion = fn.sequence_rearrange(sequence, new_order=motion_idx[idx])
+        #idx = fn.random.choice(9)
+        seq_motion = fn.sequence_rearrange(sequence, new_order=motion_idx)
         label_sequence = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
     
     seq_recon = fn.sequence_rearrange(sequence, new_order=recon_idx)
@@ -178,7 +240,7 @@ def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, devi
 
     features = fn.cat(resnet, yolo, axis=0)
 
-    return seq_backward, label_backward.gpu(), seq_motion, label_sequence.gpu(), seq_recon, seq_distill, features.gpu()
+    return seq_backward, label_backward.gpu(), seq_motion, label_sequence.gpu(), seq_recon, seq_distill, features.gpu(), key.gpu(), prefix.gpu()
 
 
 

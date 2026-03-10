@@ -1,4 +1,10 @@
 import os, sys
+
+os.environ['DALI_DISABLE_NVML'] = '1'
+
+import warnings
+warnings.filterwarnings('ignore')
+
 import gc
 import numpy as np
 import cv2
@@ -14,12 +20,15 @@ from torchvision.transforms import v2
 from models import SSMTLModel
 from dataloader_torch import SSMTLModelDataset
 
+from dali_dataloader import ssmtl_pipe
+from nvidia.dali.plugin.pytorch import DALIRaggedIterator
+
 from configParser import ConfigParser
 
 from trainUtils import set_device
 
-os.environ['DALI_DISABLE_NVML'] = '1'
 __allow_list__ = (".jpg", ".jpeg", ".png", ".tiff", ".tif")
+
 
 def extract_metrics(result_raw_dict_path:str, sigma:float=3.5):
     from torch.distributions import Normal
@@ -65,55 +74,76 @@ def extract_metrics(result_raw_dict_path:str, sigma:float=3.5):
 
     return auc_arr
 
+def decode_key(key, prefix):
+    dec = bytes(key)
+    dec_prefix = bytes(prefix)
+    dec = dec.removeprefix(dec_prefix)
+    dec = dec.decode('utf-8')
+    return dec
+
 def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, device="cpu"):
     print(f"Evaluating annotation {annotation_path}")
 
-    testDataset = SSMTLModelDataset(annotation_path=annotation_path,
-                                    input_size=config['input_size'],
-                                    window=3,
-                                    is_test=True)
+    returnNames = ['x_arrow', 'l_arrow', 'x_motion', 'l_motion', 'x_recon', 'x_distil', 'feat_distil','key','prefix']
+
+    test_pipe = ssmtl_pipe(ann_file=annotation_path,
+                            num_frames=7,
+                            batch_size=config['batch_size'],
+                            num_threads=config['workers'],
+                            train=False)
     
-    testLoader = DataLoader(testDataset, batch_size=config['batch_size'], shuffle=False, num_workers=workers)
+    test_pipe.build()
+    testLoader = DALIRaggedIterator(test_pipe, returnNames, size=-1)
+
+    # testDataset = SSMTLModelDataset(annotation_path=annotation_path,
+    #                                 input_size=config['input_size'],
+    #                                 window=3,
+    #                                 is_test=True)
+    
+    # testLoader = DataLoader(testDataset, batch_size=config['batch_size'], shuffle=False, num_workers=workers)
     
     result_scores_dict = {}
 
     with torch.no_grad():
         for idx, batch in enumerate(testLoader):
-            (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil), key = batch
+            # (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil), key = batch
             
-            x_arrow = x_arrow.to(device)
-            l_arrow = l_arrow.to(device)
-            x_motion = x_motion.to(device)
-            l_motion = l_motion.to(device)
-            x_recon = x_recon.to(device)
-            x_distil = x_distil.to(device)
-            feat_distil = feat_distil.to(device)
+            # x_arrow = x_arrow.to(device)
+            # l_arrow = l_arrow.to(device)
+            # x_motion = x_motion.to(device)
+            # l_motion = l_motion.to(device)
+            # x_recon = x_recon.to(device)
+            # x_distil = x_distil.to(device)
+            # feat_distil = feat_distil.to(device)
+            x_arrow, x_motion = batch[0]['x_arrow'], batch[0]['x_motion']
+            x_recon, x_distil = batch[0]['x_recon'], batch[0]['x_distil']
+            feat_distil = batch[0]['feat_distil']
+            key, prefix = batch[0]['key'], batch[0]['prefix']
+
+            key = key.detach().cpu().numpy()
+            prefix = prefix.detach().cpu().numpy()
 
             y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
 
-            score_arrow = F.softmax(y_arrow,dim=1)
-            score_motion = F.softmax(y_motion,dim=1)
+            score_arrow = F.softmax(y_arrow, dim=1)
+            score_motion = F.softmax(y_motion, dim=1)
             score_distill = torch.abs(y_distil[:,1000:] - feat_distil[:,1000:]).mean(dim=1)
             score_recon = torch.abs(y_recon - x_distil.reshape(y_recon.shape)).mean(dim=(1,2,3))
-
-            # print(f"Score arrow {score_arrow[:,1].detach().cpu().numpy()}")
-            # print(f"Score motion {score_motion[:,1].detach().cpu().numpy()}")
-            # print(f"Score distil {score_distill.detach().cpu().numpy()}")
-            # print(f"Score recon {score_recon.detach().cpu().numpy()}")
 
             score = 0.25 * (score_arrow[:,1] + score_motion[:,1] + score_distill + score_recon)
 
             for i,k in enumerate(key):
-                if not k in result_scores_dict.keys():
-                    result_scores_dict[k] = []
-                result_scores_dict[k].append(score[i].detach().cpu().numpy())
+                deckey = decode_key(k, prefix[i])
+                if not deckey in result_scores_dict.keys():
+                    result_scores_dict[deckey] = []
+                result_scores_dict[deckey].append(score[i].detach().cpu().numpy())
     
-            del x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil
-            del y_arrow, y_motion, y_recon, y_distil
-            del score, score_arrow, score_motion, score_distill, score_recon
+            # del x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil
+            # del y_arrow, y_motion, y_recon, y_distil
+            # del score, score_arrow, score_motion, score_distill, score_recon
 
     del testLoader
-    del testDataset
+    del test_pipe
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -124,8 +154,20 @@ def load_model(config, device="cpu"):
                        out_channel=config['out_channel'])
     
     print(f"Loading {config['saved_model']}")
-    state_dict = torch.load(config['saved_model'])
-    model.load_state_dict(state_dict['model_state_dict'], strict=True)
+    checkpoint = torch.load(config['saved_model'])
+
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+
+    # Create a new state dict without the prefix
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('_orig_mod.', '')
+        new_state_dict[new_key] = v
+
+    model.load_state_dict(new_state_dict, strict=True)
     model = model.to(device)
     model.eval()
 
