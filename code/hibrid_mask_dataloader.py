@@ -96,7 +96,6 @@ class MaskGeneratorTorch:
             center_c = c-self.radius
             
             if indices[center_r, center_c] > 0:
-                #print(f"{center_r} {center_c} = {indices[center_r, center_c]}")
                 
                 pixel_coords_x.append(r.cpu().item())
                 pixel_coords_y.append(c.cpu().item())
@@ -108,7 +107,6 @@ class MaskGeneratorTorch:
 
                 indices[r_start:r_end, c_start:c_end] = -1
                 remaining_squares-=1
-                #print(f"remaining_squares {remaining_squares}")
 
             retries+=1
 

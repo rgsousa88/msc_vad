@@ -3,6 +3,12 @@ from nvidia.dali.pipeline import do_not_convert
 import nvidia.dali.fn as fn
 import nvidia.dali.types as types
 
+import csv
+import random
+import numpy as np
+import os
+import struct
+
 image_dir = "/mnt/c/dataset/archive/Fruits/valid"
 max_batch_size = 8
 
@@ -76,12 +82,6 @@ def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_le
     labels = fn.cast(labels, dtype=types.INT64)
 
     return video, labels.gpu()
-
-import csv
-import random
-import numpy as np
-import os
-import struct
 
 @do_not_convert
 class ExternalInputIterator(object):
@@ -242,7 +242,154 @@ def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, devi
 
     return seq_backward, label_backward.gpu(), seq_motion, label_sequence.gpu(), seq_recon, seq_distill, features.gpu(), key.gpu(), prefix.gpu()
 
+from hibrid_mask_dataloader import MaskGeneratorTorch
 
+@do_not_convert
+class MaskedInputIterator(object):
+    def __init__(self, batch_size, csv_file, seq_len:int=7, input_size:int=64, cover_factor:float=0.3, square_size:int=3):
+        self.batch_size = batch_size
+        self.files = []
+        with open(csv_file, 'r') as f:
+            for row in csv.reader(f, delimiter=';'):
+                if row:
+                    self.files.append(row)
+        random.shuffle(self.files)
+        self.full_iterations = len(self.files) // self.batch_size
+        self.seq_len = seq_len
+        self.p = 0.5
+        self.indices = [i for i in range(self.seq_len)]
+        self.input_size = input_size
+        self.cover_factor = cover_factor
+        self.square_size = square_size
+
+        self.mask_generator = MaskGeneratorTorch(height=input_size, width=input_size,
+                                                 percent=cover_factor, square_size=square_size,
+                                                 device='cpu')
+        
+        self.n_squares = self.mask_generator.num_squares
+        self.radius = self.square_size // 2
+        
+    def irregular_shuffle(self, indices):
+        new_indices = indices
+        i = random.randint(0, self.seq_len-2)
+        new_indices[i], new_indices[i+1] = new_indices[i+1], new_indices[i]
+
+        return new_indices
+    
+    def irregular_duplicate(self, indices):
+        new_indices = indices
+        i = random.randint(1, self.seq_len-2)
+        new_indices[i] = new_indices[i-1]
+
+        return new_indices
+    
+    def irregular_timewarp(self,):
+        indices = sorted(random.sample(range(self.seq_len), self.seq_len))
+        indices[random.randint(1,self.seq_len-2)] += random.choice([-1,1])
+        indices = [max(0, min(self.seq_len-1, i)) for i in indices]
+
+        return indices
+    
+    def create_motion_sample(self,):
+        method = random.choice(["shuffle","duplicate","warp"])
+        if method == "shuffle":
+            indices = self.irregular_shuffle(indices=self.indices)
+
+        elif method == "duplicate":
+            indices = self.irregular_duplicate(indices=self.indices)
+
+        else:
+            indices = self.irregular_timewarp()
+
+        return indices
+    
+    def get_key_prefix_encode(self, resnet_row):
+        dirname = os.path.dirname(os.path.dirname(resnet_row))
+        frame_id = os.path.basename(dirname)
+        dirname = os.path.dirname(dirname)
+        sample_id = os.path.basename(dirname)
+        key = f"{sample_id}_{frame_id}".encode('utf-8')
+        length_prefix = struct.pack('<i', len(key))
+        final_payload = length_prefix + key
+        enc = np.frombuffer(final_payload, dtype=np.int8)
+        enc_prefix = np.frombuffer(length_prefix, dtype=np.int8)
+
+        return enc, enc_prefix
+
+
+    def __call__(self, sample_info):
+        sample_idx = sample_info.idx_in_epoch
+        if sample_info.iteration >= self.full_iterations:
+            raise StopIteration()
+        
+        batch = []
+        
+        row = self.files[sample_idx]
+        num_files = len(row)
+
+        for img_path in row[2:num_files]:
+            with open(img_path, "rb") as f:
+                batch.append(np.frombuffer(f.read(), dtype=np.uint8))
+        
+        num_mask = len(row[2:num_files])
+
+        for _ in range(num_mask):
+            batch_mask_x, batch_mask_y = self.mask_generator.get_squares_coords()
+            mask = np.ones((self.input_size, self.input_size, 3), dtype=np.uint8)
+            for i in range(self.n_squares):
+                r, c = batch_mask_x[i], batch_mask_y[i]
+                mask[r-self.radius:r+self.radius, c-self.radius:c+self.radius,:] = 0
+            batch.append(mask)
+
+        key, prefix = self.get_key_prefix_encode(row[0])
+        batch.append(key)
+        batch.append(prefix)
+
+        return batch
+    
+@pipeline_def(num_threads=4, enable_conditionals=True, device_id=0, batch_size=4)
+def masked_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, device='gpu', cover_factor:float=0.3, square_size:int=5):
+    *frames, key, prefix = fn.external_source(source=MaskedInputIterator(csv_file=ann_file,
+                                                                         batch_size=batch_size,
+                                                                         cover_factor=cover_factor,
+                                                                         square_size=square_size),
+                               num_outputs=2*num_frames+2,
+                               batch=False)
+    
+    jpegs, masks = frames[:len(frames)//2], frames[len(frames)//2:]
+    
+    images = fn.decoders.image(jpegs, device="mixed")
+    
+    sequence = fn.resize(images, size=shape, device=device)
+    sequence = fn.stack(*sequence)
+    sequence = fn.reshape(sequence, layout="FHWC")
+    sequence = fn.crop_mirror_normalize(sequence, dtype=types.FLOAT, std=[255.0], output_layout="FHWC")
+
+    masks = fn.stack(*masks)
+
+    if train:
+        prob = 0.9
+    else:
+        prob = 0.0
+    
+    do_mask = fn.random.coin_flip(probability=prob, dtype=types.DALIDataType.BOOL)
+
+    if train:
+        sequence = sequence[1:-1,:]
+        masks = masks[1:-1,:]
+    else:
+        sequence = sequence
+        masks = masks
+
+    if do_mask:
+        masked_sequence = (sequence - 0.5) * masks + 0.5
+    else:
+        masked_sequence = sequence
+
+    sequence = fn.transpose(sequence, perm=[3,0,1,2])
+    masked_sequence = fn.transpose(masked_sequence, perm=[3,0,1,2])
+
+    return sequence, masked_sequence.gpu(), key.gpu(), prefix.gpu()
 
 if __name__ == "__main__":
     pipe = simple_pipeline(image_dir, batch_size=max_batch_size, num_threads=1, device_id=0)
