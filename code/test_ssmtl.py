@@ -94,27 +94,10 @@ def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, 
     
     test_pipe.build()
     testLoader = DALIRaggedIterator(test_pipe, returnNames, size=-1)
-
-    # testDataset = SSMTLModelDataset(annotation_path=annotation_path,
-    #                                 input_size=config['input_size'],
-    #                                 window=3,
-    #                                 is_test=True)
-    
-    # testLoader = DataLoader(testDataset, batch_size=config['batch_size'], shuffle=False, num_workers=workers)
-    
     result_scores_dict = {}
 
     with torch.no_grad():
         for idx, batch in enumerate(testLoader):
-            # (x_arrow, l_arrow), (x_motion, l_motion), x_recon, (x_distil, feat_distil), key = batch
-            
-            # x_arrow = x_arrow.to(device)
-            # l_arrow = l_arrow.to(device)
-            # x_motion = x_motion.to(device)
-            # l_motion = l_motion.to(device)
-            # x_recon = x_recon.to(device)
-            # x_distil = x_distil.to(device)
-            # feat_distil = feat_distil.to(device)
             x_arrow, x_motion = batch[0]['x_arrow'], batch[0]['x_motion']
             x_recon, x_distil = batch[0]['x_recon'], batch[0]['x_distil']
             feat_distil = batch[0]['feat_distil']
@@ -137,10 +120,6 @@ def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, 
                 if not deckey in result_scores_dict.keys():
                     result_scores_dict[deckey] = []
                 result_scores_dict[deckey].append(score[i].detach().cpu().numpy())
-    
-            # del x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil
-            # del y_arrow, y_motion, y_recon, y_distil
-            # del score, score_arrow, score_motion, score_distill, score_recon
 
     del testLoader
     del test_pipe
