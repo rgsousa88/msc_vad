@@ -95,7 +95,6 @@ class YOLOInference:
         # img -> BGR
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  #BGR -> RGB
         img = self.letterbox(img, new_shape=self.img_size, auto=True)[0]
-        print(f"Input image resized to {img.shape}")
 
         img = img.astype('float32') / 255.0
         img = np.transpose(img, (2,0,1)) #HWC -> CHW
@@ -210,10 +209,8 @@ class YOLOInference:
         with torch.no_grad():
             self.yolo.eval()
             original_shape = input_img.shape
-            print(f"Original shape {original_shape}")
             img_tensor = self.preprocessing(input_img)
             model_shape = img_tensor.shape
-            print(f"Model shape {model_shape}")
             output = self.yolo(img_tensor.to(self.yolo.device))[0]
             result = self.nms_coco_output(output)
         
