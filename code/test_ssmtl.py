@@ -115,7 +115,7 @@ def compute_ssmtl_score(model, batch):
 
     score_arrow = F.softmax(y_arrow, dim=1)
     score_motion = F.softmax(y_motion, dim=1)
-    score_distill = torch.abs(y_distil[:,1000:] - feat_distil[:,1000:]).mean(dim=1)
+    score_distill = torch.abs(F.softmax(y_distil[:,1000:], dim=1) - feat_distil[:,1000:]).mean(dim=1)
     score_recon = torch.abs(y_recon - x_distil.reshape(y_recon.shape)).mean(dim=(1,2,3))
 
     score = 0.25 * (score_arrow[:,1] + score_motion[:,1] + score_distill + score_recon)
@@ -126,7 +126,7 @@ def compute_ssmtl_recon_score(model, batch):
     x = batch[0]['sequence']
     y_recon = model(x)
 
-    score = torch.abs(y_recon - x.reshape(y_recon.shape)).mean(dim=(1,2,3))
+    score = torch.abs(y_recon - x.reshape(y_recon.shape)).mean(dim=(1,3,4))
 
     return score
 
@@ -150,6 +150,7 @@ def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, 
     with torch.no_grad():
         for idx, batch in enumerate(testLoader):
             score = score_func(model, batch)
+            score = score.detach().cpu().numpy()
 
             key, prefix = batch[0]['key'], batch[0]['prefix']
             key = key.detach().cpu().numpy()
@@ -159,7 +160,7 @@ def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, 
                 deckey = decode_key(k, prefix[i])
                 if not deckey in result_scores_dict.keys():
                     result_scores_dict[deckey] = []
-                result_scores_dict[deckey].append(score[i].detach().cpu().numpy())
+                result_scores_dict[deckey].append(score[i])
 
     del testLoader
     torch.cuda.empty_cache()
@@ -220,7 +221,7 @@ if __name__ == "__main__":
 
         scores = []
         frame_idx = []
-        for frame_key in result_scores_dict:
+        for frame_key in sorted(result_scores_dict.keys()):
             frame_scores = result_scores_dict[frame_key]
             idx = int(frame_key.split('_')[-1])
             score = np.max(frame_scores).astype('float32')

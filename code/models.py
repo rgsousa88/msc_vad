@@ -317,7 +317,7 @@ class SSMTLModel(nn.Module):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-        self.backbone = CNN3D(in_channel=in_channel, out_channel=out_channel, last_pool=False)
+        self.backbone = CNN3D(in_channel=in_channel, out_channel=out_channel)
         self.pool_distil = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
         self.pool_recon = nn.MaxPool3d(kernel_size=(6,2,2), stride=(6,2,2))
         self.pool_class = nn.MaxPool3d(kernel_size=(7,2,2), stride=(7,2,2))
