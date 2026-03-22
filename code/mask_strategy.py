@@ -1,6 +1,115 @@
+import torch
+
 import numpy as np
 import os
 import math
+
+class MaskGeneratorTorch:
+    def __init__(self, 
+                 height: int, 
+                 width: int, 
+                 percent: float = None, 
+                 num_squares: int = None, 
+                 square_size: int = 10,
+                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+        
+        self.height = height
+        self.width = width
+        self.device = device
+        
+        # Move computations to device
+        self.height_tensor = torch.tensor(height, device=device)
+        self.width_tensor = torch.tensor(width, device=device)
+        
+        self.area = height * width
+        self.square_size = square_size
+        self.square_area = square_size * square_size
+        self.current = 0
+
+        # Parameter validation and computation
+        if percent is None and num_squares is None:
+            self.percent = 0.30
+            self._compute_squares()
+        elif percent is None and num_squares is not None:
+            self.num_squares = num_squares
+            self._compute_percent()
+        elif percent is not None and num_squares is None:
+            self.percent = percent
+            self._compute_squares()
+        else:
+            self.percent = percent
+            self.num_squares = num_squares
+            self._compute_square_size()
+        
+        self.radius = square_size // 2
+        
+        # Precompute valid ranges
+        self.r_range = torch.arange(self.radius, self.height - self.radius, device=self.device)
+        self.w_range = torch.arange(self.radius, self.width - self.radius, device=self.device)
+
+        self.grid_r, self.grid_w = torch.meshgrid(self.r_range, self.w_range, indexing='ij')
+        
+        self.__reset_indices__()
+
+    def _compute_squares(self) -> None:
+        self.covered_area = self.percent * self.area
+        self.num_squares = int(self.covered_area / self.square_area)
+    
+    def _compute_percent(self) -> None:
+        self.covered_area = self.num_squares * self.square_area
+        self.percent = self.covered_area / self.area
+    
+    def _compute_square_size(self) -> None:
+        self.covered_area = self.percent * self.area
+        self.square_area = self.covered_area / self.num_squares
+        self.square_size = math.floor(math.sqrt(self.square_area))
+        self.radius = self.square_size // 2
+
+    def __reset_indices__(self,):
+        self.indices = self.grid_r * self.width + self.grid_w
+    
+    def get_squares_coords(self,):
+        """
+        Creates r: List(int), c: List(int) coords for one single frame 
+        """
+        remaining_squares = self.num_squares
+        pixel_coords_x = []
+        pixel_coords_y = []
+
+        while remaining_squares > 0:
+            r = torch.randint(self.radius, self.height - self.radius, size=(1,))
+            c = torch.randint(self.radius, self.width - self.radius, size=(1,))
+
+            center_r = r-self.radius
+            center_c = c-self.radius
+
+            if self.indices[center_r,center_c] > 0:
+                pixel_coords_x.append(r.cpu().item())
+                pixel_coords_y.append(c.cpu().item())
+
+                r_start = max(0, center_r - self.radius)
+                r_end = min(self.height, center_r + self.radius + (1 if self.square_size % 2 == 0 else 0))
+                c_start = max(0, center_c - self.radius)
+                c_end = min(self.width, center_c + self.radius + (1 if self.square_size % 2 == 0 else 0))
+
+                self.indices[r_start:r_end, c_start:c_end] = -1
+                remaining_squares-=1
+        
+        self.__reset_indices__()
+        return pixel_coords_x, pixel_coords_y
+
+    def get_batched_squares_coords(self, n_batch=1, n_frame_per_batch=2):        
+        batch_coords_x = []
+        batch_coords_y = []
+
+        for i in range(n_batch):
+            for j in range(n_frame_per_batch):
+                frame_coords_x, frame_coords_y = self.get_squares_coords()
+                batch_coords_x.append(frame_coords_x)
+                batch_coords_y.append(frame_coords_y)
+        
+        return batch_coords_x, batch_coords_y
+
 
 class MaskGenerator:
     def __init__(self, height: int, width: int, percent:float = None, num_squares:int = None, square_size:int=10):
@@ -113,4 +222,26 @@ class MaskGenerator:
             pixel_coords_y.append(coord[1])
 
         self.__reset__()
+        return pixel_coords_x, pixel_coords_y
+    
+    def get_batched_squares_coords(self, n_batch=1):        
+        pixel_coords_x = []
+        pixel_coords_y = []
+
+        for i in range(n_batch):
+            pixel_coord_x_batch = []
+            pixel_coord_y_batch = []
+            
+            if len(self.map_index.keys()) == 0:
+                self.__initialize_map__()
+            
+            for pixel in next(self):
+                coord = np.unravel_index(pixel, (self.height, self.width))
+                pixel_coord_x_batch.append(coord[0])
+                pixel_coord_y_batch.append(coord[1])
+
+            pixel_coords_x.extend(pixel_coord_x_batch)
+            pixel_coords_y.extend(pixel_coord_y_batch)
+            self.__reset__()
+        
         return pixel_coords_x, pixel_coords_y
