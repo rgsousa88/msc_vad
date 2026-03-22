@@ -207,6 +207,4 @@ def main(base_path: str, base_dest_path: str, window=2):
     gc.collect()
 
 if __name__ == "__main__":
-    #main(base_path=base_path_val, base_dest_path=base_dest_path_val, window=4)
-    extract_with_threads(base_path=base_path_train, base_dest_path=base_dest_path_train, window=4, num_threads=8)
-
+    extract_with_threads(base_path=base_path_train, base_dest_path=base_dest_path_train, window=5, num_threads=8)
