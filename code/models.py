@@ -55,12 +55,11 @@ class CNN3D(nn.Module):
     Implementation of wide-deep network similar to proposed version on paper 
     Anomaly Detection in Video via Self-Supervised and Multi-Task Learning
     """
-    def __init__(self, in_channel=16, out_channel=32, temp_pool=1, last_pool=True):
+    def __init__(self, in_channel=16, out_channel=32, temp_pool=1):
         super().__init__()
         self.in_channel = in_channel
         self.out_channel = out_channel
         self.temp_pool = temp_pool
-        self.last_pool = last_pool
 
         self.block1 = nn.Sequential(ConvBlock3D(in_channel=3, out_channel=self.in_channel),
                                     ConvBlock3D(in_channel=self.in_channel, out_channel=self.in_channel),
@@ -70,25 +69,15 @@ class CNN3D(nn.Module):
                                     ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
                                     nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
 
-        # self.block3 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
-        #                             nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
-        
-        # if last_pool:
-        #     self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
-        #                             nn.MaxPool3d(kernel_size=(self.temp_pool,2,2), stride=(self.temp_pool,2,2)))
-        # else:
-        #     self.block4 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel))
-
         self.block3 = nn.Sequential(ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
-                                    ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel),
-                                    nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)))
+                                    nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)),
+                                    ConvBlock3D(in_channel=self.out_channel, out_channel=self.out_channel))
         
 
     def forward(self, x):
         y = self.block1(x)
         y = self.block2(y)
         y = self.block3(y)
-        #y = self.block4(y)
 
         return y
 
@@ -101,7 +90,7 @@ class CNN3DRes(CNN3D):
         y1 = self.block1(x)
         y2 = self.block2(y1)
         y3 = self.block3(y2) + self.pool1(y2)
-        y = self.block4(y3) + self.pool1(y3)
+        y = self.pool1(y3)
 
         return y
 
@@ -115,11 +104,10 @@ class CNN3DResSkip(CNN3D):
         y1 = self.block1(x)
         y2 = self.block2(y1)
         y3 = self.block3(y2)
-        y4 = self.block4(y3)
         
         y = self.channel_adapter(y1)
-        y = F.interpolate(y, (y4.shape[2], y4.shape[3], y4.shape[4]))
-        y = y + y4
+        y = F.interpolate(y, (y3.shape[2], y3.shape[3], y3.shape[4]))
+        y = y + y3
 
         return y
 
@@ -133,9 +121,8 @@ class CNN3DResSkip2(CNN3D):
         y1 = self.block1(x)
         y2 = self.block2(y1)
         y3 = self.block3(y2)
-        y4 = self.block4(y3)
         
-        y = self.channel_adapter(y4)
+        y = self.channel_adapter(y3)
         y = F.interpolate(y, (y1.shape[2], y1.shape[3], y1.shape[4]))
         y = y + y1
 
@@ -288,7 +275,41 @@ class SSMTLRecon(nn.Module):
         y = self.block4(y)
 
         return y
+    
+class SSMTLRecon3D(nn.Module):
+    def __init__(self, in_channel=64, out_channel=3):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
 
+        self.block1 = nn.Sequential(nn.Conv3d(in_channels=in_channel, out_channels=in_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU(),
+                                    nn.Conv3d(in_channels=in_channel, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+
+        self.block2 = nn.Sequential(nn.Conv3d(in_channels=in_channel//2, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU(),
+                                    nn.Conv3d(in_channels=in_channel//2, out_channels=in_channel//4, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+
+        self.block3 = nn.Sequential(nn.Conv3d(in_channels=in_channel//4, out_channels=in_channel//8, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+
+        self.block4 = nn.Sequential(nn.Conv3d(in_channels=in_channel//8, out_channels=out_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.ReLU())
+    
+    def forward(self, x):
+        y = self.block1(x)
+        y = F.interpolate(y, scale_factor=(1,2,2))
+
+        y = self.block2(y)
+        y = F.interpolate(y, scale_factor=(1,2,2))
+
+        y = self.block3(y)
+        y = F.interpolate(y, scale_factor=(1,2,2))
+
+        y = self.block4(y)
+        return y
 
 class SSMTLModel(nn.Module):
     def __init__(self, in_channel=32, out_channel=64):
@@ -333,32 +354,37 @@ class SSMTLModel(nn.Module):
         y_arrow = torch.squeeze(y_arrow, dim=-3)
         y_arrow = self.arrow_head(y_arrow)
 
-        del x_arrow
-        torch.cuda.empty_cache()
-
         y_motion = self.backbone(x_motion)
         y_motion = self.pool_class(y_motion)
         y_motion = torch.squeeze(y_motion, dim=-3)
         y_motion = self.motion_head(y_motion)
-
-        del x_motion
-        torch.cuda.empty_cache()
 
         y_recon = self.backbone(x_recon)
         y_recon = self.pool_recon(y_recon)
         y_recon = torch.squeeze(y_recon, dim=-3)
         y_recon = self.recon_head(y_recon)
 
-        del x_recon
-        torch.cuda.empty_cache()
-
         y_distil = self.backbone(x_distil)
         y_distil = self.pool_distil(y_distil)
         y_distil = torch.squeeze(y_distil, dim=-3)        
         y_distil = self.distil_head(y_distil)
 
-        return y_arrow, y_motion, y_recon, y_distil
+        return y_arrow, y_motion, y_recon, y_distil 
 
+class SSTMLAutoEncoder(nn.Module):
+    def __init__(self, in_channel:int=32, out_channel:int=64):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.encoder = CNN3D(in_channel=in_channel, out_channel=out_channel)
+
+        self.decoder = SSMTLRecon3D(in_channel=out_channel, out_channel=3)
+        
+    def forward(self, x):
+        emb = self.encoder(x)
+        recon = self.decoder(emb)
+
+        return recon
 
 
 

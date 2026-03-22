@@ -17,10 +17,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2
 
-from models import SSMTLModel
+from models import SSMTLModel, SSTMLAutoEncoder
+from model_factory import ModelFactory
 from dataloader_torch import SSMTLModelDataset
 
-from dali_dataloader import ssmtl_pipe
+from dali_dataloader import ssmtl_pipe, masked_pipe
 from nvidia.dali.plugin.pytorch import DALIRaggedIterator
 
 from configParser import ConfigParser
@@ -81,39 +82,78 @@ def decode_key(key, prefix):
     dec = dec.decode('utf-8')
     return dec
 
-def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, device="cpu"):
-    print(f"Evaluating annotation {annotation_path}")
-
-    returnNames = ['x_arrow', 'l_arrow', 'x_motion', 'l_motion', 'x_recon', 'x_distil', 'feat_distil','key','prefix']
-
-    test_pipe = ssmtl_pipe(ann_file=annotation_path,
+def build_loader(config:dict, annotation_path:str, workers:int=4, device="cpu"):
+    modelName = config['model']
+    if modelName == 'SSMTLModel':
+        returnNames = ['x_arrow', 'l_arrow', 'x_motion', 'l_motion', 'x_recon', 'x_distil', 'feat_distil','key','prefix']
+        test_pipe = ssmtl_pipe(ann_file=annotation_path,
                             num_frames=7,
                             batch_size=config['batch_size'],
                             num_threads=config['workers'],
                             train=False)
+    elif modelName == 'SSMTLAutoencoder':
+        returnNames = ['sequence', 'masked_sequence', 'key', 'prefix']
+        test_pipe = masked_pipe(ann_file=annotation_path,
+                                num_frames=7,
+                                batch_size=config['batch_size'],
+                                num_threads=config['workers'],
+                                train=False)
+    else:
+        raise ValueError(f"Invalid modelName {modelName}")
     
     test_pipe.build()
     testLoader = DALIRaggedIterator(test_pipe, returnNames, size=-1)
+
+    return testLoader
+
+def compute_ssmtl_score(model, batch):
+    x_arrow, x_motion = batch[0]['x_arrow'], batch[0]['x_motion']
+    x_recon, x_distil = batch[0]['x_recon'], batch[0]['x_distil']
+    feat_distil = batch[0]['feat_distil']
+
+    y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
+
+    score_arrow = F.softmax(y_arrow, dim=1)
+    score_motion = F.softmax(y_motion, dim=1)
+    score_distill = torch.abs(y_distil[:,1000:] - feat_distil[:,1000:]).mean(dim=1)
+    score_recon = torch.abs(y_recon - x_distil.reshape(y_recon.shape)).mean(dim=(1,2,3))
+
+    score = 0.25 * (score_arrow[:,1] + score_motion[:,1] + score_distill + score_recon)
+
+    return score
+
+def compute_ssmtl_recon_score(model, batch):
+    x = batch[0]['sequence']
+    y_recon = model(x)
+
+    score = torch.abs(y_recon - x.reshape(y_recon.shape)).mean(dim=(1,2,3))
+
+    return score
+
+def build_score_func(config:dict):
+    modelName = config['model']
+    if modelName == 'SSMTLModel':
+        return compute_ssmtl_score
+    elif modelName == 'SSMTLAutoencoder':
+        return compute_ssmtl_recon_score
+    else:
+        raise ValueError(f"Invalid modelName {modelName}")
+
+def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, device="cpu"):
+    print(f"Evaluating annotation {annotation_path}")
+
+    testLoader = build_loader(config=config, annotation_path=annotation_path, workers=workers, device=device)
+    score_func = build_score_func(config=config)
+    
     result_scores_dict = {}
 
     with torch.no_grad():
         for idx, batch in enumerate(testLoader):
-            x_arrow, x_motion = batch[0]['x_arrow'], batch[0]['x_motion']
-            x_recon, x_distil = batch[0]['x_recon'], batch[0]['x_distil']
-            feat_distil = batch[0]['feat_distil']
-            key, prefix = batch[0]['key'], batch[0]['prefix']
+            score = score_func(model, batch)
 
+            key, prefix = batch[0]['key'], batch[0]['prefix']
             key = key.detach().cpu().numpy()
             prefix = prefix.detach().cpu().numpy()
-
-            y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
-
-            score_arrow = F.softmax(y_arrow, dim=1)
-            score_motion = F.softmax(y_motion, dim=1)
-            score_distill = torch.abs(y_distil[:,1000:] - feat_distil[:,1000:]).mean(dim=1)
-            score_recon = torch.abs(y_recon - x_distil.reshape(y_recon.shape)).mean(dim=(1,2,3))
-
-            score = 0.25 * (score_arrow[:,1] + score_motion[:,1] + score_distill + score_recon)
 
             for i,k in enumerate(key):
                 deckey = decode_key(k, prefix[i])
@@ -122,15 +162,16 @@ def compute_anomaly_scores(model, annotation_path:str, config, workers:int = 4, 
                 result_scores_dict[deckey].append(score[i].detach().cpu().numpy())
 
     del testLoader
-    del test_pipe
     torch.cuda.empty_cache()
-    gc.collect()
 
     return result_scores_dict
 
 def load_model(config, device="cpu"):
-    model = SSMTLModel(in_channel=config['in_channel'],
-                       out_channel=config['out_channel'])
+    factory = ModelFactory()
+
+    model = factory.create_model(model_name=config['model'],
+                                 in_channel=config['in_channel'],
+                                 out_channel=config['out_channel'])
     
     print(f"Loading {config['saved_model']}")
     checkpoint = torch.load(config['saved_model'])
@@ -153,8 +194,14 @@ def load_model(config, device="cpu"):
     return model
 
 if __name__ == "__main__":
-    configFile = "configSSMTL.json"
-    config = ConfigParser(configFile).config
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config_file', type=str, required=True)
+    args = parser.parse_args()
+
+    config = ConfigParser(args.config_file).config
+
     checkpoint = config['saved_model']
     device = "cuda" if torch.cuda.is_available() else "cpu"
     test_path = config['test_ann_path']

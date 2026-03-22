@@ -246,7 +246,7 @@ from hibrid_mask_dataloader import MaskGeneratorTorch
 
 @do_not_convert
 class MaskedInputIterator(object):
-    def __init__(self, batch_size, csv_file, seq_len:int=7, input_size:int=64, cover_factor:float=0.3, square_size:int=3):
+    def __init__(self, batch_size, csv_file, seq_len:int=7, input_size:int=64, train:bool=True, cover_factor:float=0.3, square_size:int=3):
         self.batch_size = batch_size
         self.files = []
         with open(csv_file, 'r') as f:
@@ -256,6 +256,7 @@ class MaskedInputIterator(object):
         random.shuffle(self.files)
         self.full_iterations = len(self.files) // self.batch_size
         self.seq_len = seq_len
+        self.is_train = train
         self.p = 0.5
         self.indices = [i for i in range(self.seq_len)]
         self.input_size = input_size
@@ -334,11 +335,12 @@ class MaskedInputIterator(object):
         num_mask = len(row[2:num_files])
 
         for _ in range(num_mask):
-            batch_mask_x, batch_mask_y = self.mask_generator.get_squares_coords()
             mask = np.ones((self.input_size, self.input_size, 3), dtype=np.uint8)
-            for i in range(self.n_squares):
-                r, c = batch_mask_x[i], batch_mask_y[i]
-                mask[r-self.radius:r+self.radius, c-self.radius:c+self.radius,:] = 0
+            if self.is_train:
+                batch_mask_x, batch_mask_y = self.mask_generator.get_squares_coords()
+                for i in range(self.n_squares):
+                    r, c = batch_mask_x[i], batch_mask_y[i]
+                    mask[r-self.radius:r+self.radius, c-self.radius:c+self.radius,:] = 0
             batch.append(mask)
 
         key, prefix = self.get_key_prefix_encode(row[0])
@@ -351,6 +353,7 @@ class MaskedInputIterator(object):
 def masked_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, device='gpu', cover_factor:float=0.3, square_size:int=5):
     *frames, key, prefix = fn.external_source(source=MaskedInputIterator(csv_file=ann_file,
                                                                          batch_size=batch_size,
+                                                                         train=train,
                                                                          cover_factor=cover_factor,
                                                                          square_size=square_size),
                                num_outputs=2*num_frames+2,
