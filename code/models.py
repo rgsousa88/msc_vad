@@ -371,7 +371,7 @@ class SSMTLModel(nn.Module):
 
         return y_arrow, y_motion, y_recon, y_distil 
 
-class SSTMLAutoEncoder(nn.Module):
+class SSMTLAutoEncoder(nn.Module):
     def __init__(self, in_channel:int=32, out_channel:int=64):
         super().__init__()
         self.in_channel = in_channel
@@ -385,6 +385,33 @@ class SSTMLAutoEncoder(nn.Module):
         recon = self.decoder(emb)
 
         return recon
+    
+class SSMTLAutoEncArrow(nn.Module):
+    def __init__(self, in_channel:int=32, out_channel:int=64):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        
+        self.encoder = CNN3D(in_channel=in_channel, out_channel=out_channel)
+        self.decoder = SSMTLRecon3D(in_channel=out_channel, out_channel=3)
+
+        self.pool_arrow = nn.MaxPool3d(kernel_size=(7,2,2), stride=(7,2,2))
+        self.arrow_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+                                        nn.ReLU(),
+                                        nn.MaxPool2d(2,2),
+                                        nn.Flatten(),
+                                        nn.Linear(32,2))
+        
+    def forward(self, x_masked, x_arrow):
+        emb = self.encoder(x_masked)
+        y_recon = self.decoder(emb)
+        
+        y_arrow = self.encoder(x_arrow)
+        y_arrow = self.pool_arrow(y_arrow)
+        y_arrow = torch.squeeze(y_arrow, dim=-3)
+        y_arrow = self.arrow_head(y_arrow)
+
+        return y_recon, y_arrow
 
 
 

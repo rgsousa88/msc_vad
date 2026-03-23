@@ -9,16 +9,7 @@ class ModelFactory:
         Cria uma instância do modelo especificado.
         
         Args:
-            model_name: Nome do modelo a ser criado. Opções:
-                - 'ConvBlock3D'
-                - 'UpConvBlock3D'
-                - 'CNN3D'
-                - 'CNN3DRes'
-                - 'CameraClassifier'
-                - 'CNN3DRecon'
-                - 'CNN3DResRecon'
-                - 'CNN3DResReconSkipV1'
-                - 'CNN3DResReconSkipV2'
+            model_name: Nome do modelo a ser criado.
             **kwargs: Argumentos para o construtor do modelo.
             
         Returns:
@@ -38,7 +29,8 @@ class ModelFactory:
             'CNN3DResReconSkipV1': CNN3DResReconSkipV1,
             'CNN3DResReconSkipV2': CNN3DResReconSkipV2,
             'SSMTLModel': SSMTLModel,
-            'SSMTLAutoencoder': SSTMLAutoEncoder
+            'SSMTLAutoencoder': SSMTLAutoEncoder,
+            'SSTMLAutoEncArrow':SSMTLAutoEncArrow
         }
         
         if model_name not in model_registry:
