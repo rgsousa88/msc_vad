@@ -1,5 +1,5 @@
 {
-    "model":"SSMTLAutoencoder",
+    "model":"SSTMLAutoEncArrow",
     "input_size": 64,
     "in_channel":32,
     "out_channel":64,
@@ -20,7 +20,7 @@
     "use_gpu": true,
     "workers": 4,
     "dataset": "Shanghai",
-    "saved_model": "/home/rgadelha/msc_vad/code/checkpoint/SSTMLAutoEncoder_20260321_193820.pth",
+    "saved_model": "",
     "train_ann": "/mnt/c/dataset/MSC/shanghai/train_crop_4/annotation_train.csv",
     "val_ann": "/mnt/c/dataset/MSC/shanghai/val_crop_4/annotation_val.csv",
     "test_ann_path": "/mnt/c/dataset/MSC/shanghai/test_crop_3/",
