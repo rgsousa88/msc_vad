@@ -10,9 +10,9 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 from dataloader_torch import SSMTLModelDataset
-from models import SSTMLAutoEncoder
+from model_factory import ModelFactory
 
-from dali_dataloader import masked_pipe
+from dali_dataloader import masked_pipe, masked_arrow_pipe
 from nvidia.dali.plugin.pytorch import DALIRaggedIterator
 
 from time import time
@@ -30,17 +30,56 @@ os.environ['DALI_DISABLE_NVML'] = '1'
 torch.backends.cuda.matmul.allow_tf32 = True  # Usar TF32 na RTX 40
 torch.backends.cudnn.allow_tf32 = True
 
-def create_dali_loaders(config):   
-    returnNames = ['sequence', 'masked_sequence', 'key', 'prefix']
+class ReconLoss(nn.Module):
+    def __init__(self, w1:float = 1.0, w2:float = 1.0):
+        super().__init__()
+        self.loss_l1 = nn.L1Loss(reduction='mean')
+        self.loss_l2 = nn.MSELoss(reduction='mean')
+        self.w1 = w1
+        self.w2 = w2
 
-    train_pipe = masked_pipe(ann_file=config['train_ann'],
+    def forward(self, pred, target):
+        return self.w1 * self.loss_l1(pred, target) + self.w2 * self.loss_l2(pred, target)
+    
+class ReconArrowLoss(nn.Module):
+    def __init__(self, w1:float = 1.0, w2:float = 1.0):
+        super().__init__()
+        self.loss_recon = ReconLoss(w1=w1, w2=w2)
+        self.loss_arrow = nn.CrossEntropyLoss()
+
+    def forward(self, pred_recon, target_recon, pred_arrow, target_arrow):
+        loss = self.loss_recon(pred_recon, target_recon)
+        loss += self.loss_arrow(pred_arrow, target_arrow.squeeze())
+        return loss
+    
+def get_criterion(config):
+    modelName = config['model']
+    if modelName == 'SSMTLAutoencoder':
+        return ReconLoss()
+    elif modelName == 'SSTMLAutoEncArrow':
+        return ReconArrowLoss()
+    else:
+        raise ValueError(f"Invalid model {modelName}")
+
+def create_dali_loaders(config):   
+    modelName = config['model']
+    if modelName == 'SSMTLAutoencoder':
+        returnNames = ['sequence', 'masked_sequence', 'key', 'prefix']
+        pipeline_func = masked_pipe
+    elif modelName == 'SSTMLAutoEncArrow':
+        returnNames = ['sequence', 'masked_sequence', 'seq_backward', 'label_backward','key', 'prefix']
+        pipeline_func = masked_arrow_pipe
+    else:
+        raise ValueError(f"Invalid model {modelName}")
+
+    train_pipe = pipeline_func(ann_file=config['train_ann'],
                             num_frames=9,
                             batch_size=config['batch_size'],
                             num_threads=config['workers'],
                             train=True,
                             cover_factor=0.3, square_size=7)
     
-    val_pipe = masked_pipe(ann_file=config['val_ann'],
+    val_pipe = pipeline_func(ann_file=config['val_ann'],
                           num_frames=9,
                           batch_size=config['batch_size'],
                           num_threads=config['workers'],
@@ -55,12 +94,40 @@ def create_dali_loaders(config):
 
     return train_iter, val_iter
 
+def recon_step(model, batch, criterion):
+    x, x_masked = batch[0]['sequence'], batch[0]['masked_sequence']
+    y_recon = model(x_masked)
+    loss = criterion(y_recon, x)
+    
+    return loss
+
+def recon_arrow_step(model, batch, criterion):
+    x, x_masked, x_arrow = batch[0]['sequence'], batch[0]['masked_sequence'], batch[0]['seq_backward']
+    label_arrow = batch[0]['label_backward']
+    y_recon, y_arrow = model(x_masked, x_arrow)
+
+    loss = criterion(y_recon, x, y_arrow, label_arrow)
+
+    return loss
+
+def get_step_func(config):
+    modelName = config['model']
+    if modelName == 'SSMTLAutoencoder':
+        return recon_step
+    elif modelName == 'SSTMLAutoEncArrow':
+        return recon_arrow_step
+    else:
+        raise ValueError(f"Invalid model {modelName}")
+
+
 def train(config):
     device = set_device(use_gpu=config['use_gpu'])
 
     trainLoader, valLoader = create_dali_loaders(config)
 
-    model = SSTMLAutoEncoder(in_channel=config['in_channel'], out_channel=config['out_channel'])
+    model = ModelFactory.create_model(model_name=config['model'],
+                                      in_channel=config['in_channel'],
+                                      out_channel=config['out_channel'])
     model = model.to(device=device)
 
     savedModel = config.get('saved_model', None)
@@ -69,13 +136,13 @@ def train(config):
         model.load_state_dict(state_dict['model_state_dict'], strict=False)
         print(f"Loaded saved model {savedModel}")
 
-    loss_l1 = nn.L1Loss(reduction='mean')
-    loss_l2 = nn.MSELoss(reduction='mean')
-
+    criterion = get_criterion(config)
     optimizer = optim.Adam(lr=config['lr'], params=model.parameters())
 
     scheduler_config = config.get('scheduler_param', {})
     scheduler = get_scheduler(config['scheduler'], optimizer=optimizer, **scheduler_config)
+
+    step_func = get_step_func(config)
 
     start_time = time()
     best_val_loss = float('inf')
@@ -93,12 +160,7 @@ def train(config):
         model.train()
         for batch in t_train:
             try:
-                x, x_masked = batch[0]['sequence'], batch[0]['masked_sequence']
-
-                y_recon = model(x_masked)
-
-                loss = loss_l1(x, y_recon)
-                loss += loss_l2(x, y_recon)
+                loss = step_func(model, batch, criterion)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -128,12 +190,7 @@ def train(config):
         for batch in t_val:
             try:
                 with torch.no_grad():
-                    x, x_masked = batch[0]['sequence'], batch[0]['masked_sequence']
-
-                    y_recon = model(x_masked)
-
-                    loss = loss_l1(x, y_recon)
-                    loss += loss_l2(x, y_recon)
+                    loss = step_func(model, batch, criterion)
                 
                 loss_value += loss.detach().item()
                 n_batches += 1
