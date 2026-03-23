@@ -394,6 +394,62 @@ def masked_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, dev
 
     return sequence, masked_sequence.gpu(), key.gpu(), prefix.gpu()
 
+@pipeline_def(num_threads=4, enable_conditionals=True, device_id=0, batch_size=4)
+def masked_arrow_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, device='gpu', cover_factor:float=0.3, square_size:int=5):
+    *frames, key, prefix = fn.external_source(source=MaskedInputIterator(csv_file=ann_file,
+                                                                         batch_size=batch_size,
+                                                                         train=train,
+                                                                         cover_factor=cover_factor,
+                                                                         square_size=square_size),
+                               num_outputs=2*num_frames+2,
+                               batch=False)
+    
+    jpegs, masks = frames[:len(frames)//2], frames[len(frames)//2:]
+    
+    images = fn.decoders.image(jpegs, device="mixed")
+    
+    sequence = fn.resize(images, size=shape, device=device)
+    sequence = fn.stack(*sequence)
+    sequence = fn.reshape(sequence, layout="FHWC")
+    sequence = fn.crop_mirror_normalize(sequence, dtype=types.FLOAT, std=[255.0], output_layout="FHWC")
+
+    masks = fn.stack(*masks)
+
+    if train:
+        prob = 0.9
+        prob_backward = 0.5
+    else:
+        prob = 0.0
+        prob_backward = 0.0
+    
+    do_mask = fn.random.coin_flip(probability=prob, dtype=types.DALIDataType.BOOL)
+    do_backward = fn.random.coin_flip(probability=prob_backward, dtype=types.DALIDataType.BOOL)
+
+    if train:
+        seq_backward = sequence[1:-1,:]
+        sequence = sequence[1:-1,:]
+        masks = masks[1:-1,:]
+    else:
+        seq_backward = sequence
+        sequence = sequence
+        masks = masks
+
+    if do_mask:
+        masked_sequence = (sequence - 0.5) * masks + 0.5
+    else:
+        masked_sequence = sequence
+
+    label_backward = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
+    if do_backward:
+        seq_backward = seq_backward[::-1,:,:,:]
+        label_backward = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
+
+    sequence = fn.transpose(sequence, perm=[3,0,1,2])
+    masked_sequence = fn.transpose(masked_sequence, perm=[3,0,1,2])
+    seq_backward = fn.transpose(seq_backward, perm=[3,0,1,2])
+
+    return sequence, masked_sequence.gpu(), seq_backward, label_backward.gpu(), key.gpu(), prefix.gpu()
+
 if __name__ == "__main__":
     pipe = simple_pipeline(image_dir, batch_size=max_batch_size, num_threads=1, device_id=0)
     pipe.build()
