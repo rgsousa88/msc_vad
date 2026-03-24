@@ -17,11 +17,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2
 
-from models import SSMTLModel, SSTMLAutoEncoder
 from model_factory import ModelFactory
 from dataloader_torch import SSMTLModelDataset
 
-from dali_dataloader import ssmtl_pipe, masked_pipe
+from dali_dataloader import ssmtl_pipe, masked_pipe, masked_arrow_pipe
 from nvidia.dali.plugin.pytorch import DALIRaggedIterator
 
 from configParser import ConfigParser
@@ -98,6 +97,13 @@ def build_loader(config:dict, annotation_path:str, workers:int=4, device="cpu"):
                                 batch_size=config['batch_size'],
                                 num_threads=config['workers'],
                                 train=False)
+    elif modelName == 'SSTMLAutoEncArrow':
+        returnNames = ['sequence', 'masked_sequence', 'seq_backward', 'label_backward','key', 'prefix']
+        test_pipe = masked_arrow_pipe(ann_file=annotation_path,
+                                num_frames=7,
+                                batch_size=config['batch_size'],
+                                num_threads=config['workers'],
+                                train=False)
     else:
         raise ValueError(f"Invalid modelName {modelName}")
     
@@ -115,7 +121,7 @@ def compute_ssmtl_score(model, batch):
 
     score_arrow = F.softmax(y_arrow, dim=1)
     score_motion = F.softmax(y_motion, dim=1)
-    score_distill = torch.abs(F.softmax(y_distil[:,1000:], dim=1) - feat_distil[:,1000:]).mean(dim=1)
+    score_distill = torch.abs(y_distil[:,1000:] - feat_distil[:,1000:]).mean(dim=1)
     score_recon = torch.abs(y_recon - x_distil.reshape(y_recon.shape)).mean(dim=(1,2,3))
 
     score = 0.25 * (score_arrow[:,1] + score_motion[:,1] + score_distill + score_recon)
@@ -125,9 +131,19 @@ def compute_ssmtl_score(model, batch):
 def compute_ssmtl_recon_score(model, batch):
     x = batch[0]['sequence']
     y_recon = model(x)
-
+    
     score = torch.abs(y_recon - x.reshape(y_recon.shape)).mean(dim=(1,3,4))
+    return score
 
+def compute_ssmtl_recon_arrow_score(model, batch):
+    x, x_arrow = batch[0]['sequence'], batch[0]['seq_backward']
+    y_recon, y_arrow = model(x, x_arrow)
+
+    score_arrow = F.softmax(y_arrow, dim=1)
+    score_recon = torch.abs(y_recon - x.reshape(y_recon.shape)).mean(dim=(1,3,4))
+
+    score = 0.5 * (score_arrow[:,1] + torch.max(score_recon, dim=1).values)
+    
     return score
 
 def build_score_func(config:dict):
@@ -136,6 +152,8 @@ def build_score_func(config:dict):
         return compute_ssmtl_score
     elif modelName == 'SSMTLAutoencoder':
         return compute_ssmtl_recon_score
+    elif modelName == 'SSTMLAutoEncArrow':
+        return compute_ssmtl_recon_arrow_score
     else:
         raise ValueError(f"Invalid modelName {modelName}")
 
