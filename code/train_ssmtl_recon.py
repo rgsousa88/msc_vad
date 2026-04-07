@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import v2
 from torch.utils.tensorboard import SummaryWriter
 
+from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
+
 import numpy as np
 
 from dataloader_torch import SSMTLModelDataset
@@ -30,16 +32,21 @@ os.environ['DALI_DISABLE_NVML'] = '1'
 torch.backends.cuda.matmul.allow_tf32 = True  # Usar TF32 na RTX 40
 torch.backends.cudnn.allow_tf32 = True
 
+RECON_BASED_MODELS = ['SSMTLAutoencoder','CNN3DResReconSkipV2','CNN3DResReconSSMTLDec']
+MTL_BASED_MODELS = ['SSTMLAutoEncArrow']
+
 class ReconLoss(nn.Module):
-    def __init__(self, w1:float = 1.0, w2:float = 1.0):
+    def __init__(self, w1:float = 1.0, w2:float = 1.0, device='cuda:0'):
         super().__init__()
         self.loss_l1 = nn.L1Loss(reduction='mean')
         self.loss_l2 = nn.MSELoss(reduction='mean')
+        self.loss_ssim = SSIM(data_range=1.0, reduction='elementwise_mean').to(device)
         self.w1 = w1
         self.w2 = w2
 
     def forward(self, pred, target):
-        return self.w1 * self.loss_l1(pred, target) + self.w2 * self.loss_l2(pred, target)
+        ssim_value = 1.0 - self.loss_ssim(pred, target)
+        return self.w1 * self.loss_l1(pred, target) + self.w2 * self.loss_l2(pred, target) + ssim_value
     
 class ReconArrowLoss(nn.Module):
     def __init__(self, w1:float = 1.0, w2:float = 1.0):
@@ -54,19 +61,19 @@ class ReconArrowLoss(nn.Module):
     
 def get_criterion(config):
     modelName = config['model']
-    if modelName == 'SSMTLAutoencoder':
+    if modelName in RECON_BASED_MODELS:
         return ReconLoss()
-    elif modelName == 'SSTMLAutoEncArrow':
+    elif modelName in MTL_BASED_MODELS:
         return ReconArrowLoss()
     else:
         raise ValueError(f"Invalid model {modelName}")
 
 def create_dali_loaders(config):   
     modelName = config['model']
-    if modelName == 'SSMTLAutoencoder':
+    if modelName in RECON_BASED_MODELS:
         returnNames = ['sequence', 'masked_sequence', 'key', 'prefix']
         pipeline_func = masked_pipe
-    elif modelName == 'SSTMLAutoEncArrow':
+    elif modelName in MTL_BASED_MODELS:
         returnNames = ['sequence', 'masked_sequence', 'seq_backward', 'label_backward','key', 'prefix']
         pipeline_func = masked_arrow_pipe
     else:
@@ -77,14 +84,14 @@ def create_dali_loaders(config):
                             batch_size=config['batch_size'],
                             num_threads=config['workers'],
                             train=True,
-                            cover_factor=0.3, square_size=7)
+                            cover_factor=0.4, square_size=8)
     
     val_pipe = pipeline_func(ann_file=config['val_ann'],
                           num_frames=9,
                           batch_size=config['batch_size'],
                           num_threads=config['workers'],
                           train=True,
-                          cover_factor=0.3, square_size=7)
+                          cover_factor=0.4, square_size=8)
     
     train_pipe.build()
     train_iter = DALIRaggedIterator(train_pipe, returnNames, size=-1)
@@ -112,9 +119,9 @@ def recon_arrow_step(model, batch, criterion):
 
 def get_step_func(config):
     modelName = config['model']
-    if modelName == 'SSMTLAutoencoder':
+    if modelName in RECON_BASED_MODELS:
         return recon_step
-    elif modelName == 'SSTMLAutoEncArrow':
+    elif modelName in MTL_BASED_MODELS:
         return recon_arrow_step
     else:
         raise ValueError(f"Invalid model {modelName}")
@@ -140,14 +147,14 @@ def train(config):
     optimizer = optim.Adam(lr=config['lr'], params=model.parameters())
 
     scheduler_config = config.get('scheduler_param', {})
-    scheduler = get_scheduler(config['scheduler'], optimizer=optimizer, **scheduler_config)
+    scheduler = lr_scheduler.StepLR(optimizer=optimizer, step_size=scheduler_config['step_size'])
 
     step_func = get_step_func(config)
 
     start_time = time()
     best_val_loss = float('inf')
 
-    writer = SummaryWriter(log_dir=f"runs/ssmtl_recon_{int(time())}")
+    writer = SummaryWriter(log_dir=f"runs/{config['model']}_{int(time())}")
     
     for epoch in range(config['num_epochs']):
         tic = time()
@@ -178,7 +185,6 @@ def train(config):
                 print(f"Exception {e}")
                 return
         
-        scheduler.step()
         train_loss = loss_value / n_batches
         
         loss_value = 0.0
@@ -204,11 +210,14 @@ def train(config):
                 print(e)
                 return
         
+        scheduler.step()
+        
         val_loss = loss_value / n_batches
 
         # Tensorboard logging
         writer.add_scalar("Loss/train", train_loss, epoch)
         writer.add_scalar("Loss/val", val_loss, epoch)
+        writer.add_scalar("LR", scheduler.get_last_lr()[0] , epoch)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss

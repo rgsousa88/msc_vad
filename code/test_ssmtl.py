@@ -29,6 +29,8 @@ from trainUtils import set_device
 
 __allow_list__ = (".jpg", ".jpeg", ".png", ".tiff", ".tif")
 
+from train_ssmtl_recon import RECON_BASED_MODELS, MTL_BASED_MODELS
+
 
 def extract_metrics(result_raw_dict_path:str, sigma:float=3.5):
     from torch.distributions import Normal
@@ -60,7 +62,7 @@ def extract_metrics(result_raw_dict_path:str, sigma:float=3.5):
             smooth_err = F.conv1d(raw_err_pad, weight=gaussian_filter.view(1, 1, -1), padding='valid').squeeze()
 
             try:
-                macro_auc = roc_auc_score(label, smooth_err)
+                macro_auc = roc_auc_score(label, raw_err) #smooth_err)
                 
                 if not math.isnan(macro_auc):
                     auc_arr[key] = macro_auc
@@ -90,14 +92,14 @@ def build_loader(config:dict, annotation_path:str, workers:int=4, device="cpu"):
                             batch_size=config['batch_size'],
                             num_threads=config['workers'],
                             train=False)
-    elif modelName == 'SSMTLAutoencoder':
+    elif modelName in RECON_BASED_MODELS:
         returnNames = ['sequence', 'masked_sequence', 'key', 'prefix']
         test_pipe = masked_pipe(ann_file=annotation_path,
                                 num_frames=7,
                                 batch_size=config['batch_size'],
                                 num_threads=config['workers'],
                                 train=False)
-    elif modelName == 'SSTMLAutoEncArrow':
+    elif modelName in MTL_BASED_MODELS:
         returnNames = ['sequence', 'masked_sequence', 'seq_backward', 'label_backward','key', 'prefix']
         test_pipe = masked_arrow_pipe(ann_file=annotation_path,
                                 num_frames=7,
@@ -150,9 +152,9 @@ def build_score_func(config:dict):
     modelName = config['model']
     if modelName == 'SSMTLModel':
         return compute_ssmtl_score
-    elif modelName == 'SSMTLAutoencoder':
+    elif modelName in RECON_BASED_MODELS:
         return compute_ssmtl_recon_score
-    elif modelName == 'SSTMLAutoEncArrow':
+    elif modelName in MTL_BASED_MODELS:
         return compute_ssmtl_recon_arrow_score
     else:
         raise ValueError(f"Invalid modelName {modelName}")

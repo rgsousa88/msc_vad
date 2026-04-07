@@ -82,8 +82,8 @@ class CNN3D(nn.Module):
         return y
 
 class CNN3DRes(CNN3D):
-    def __init__(self, in_channel=32, out_channel=64, temp_pool=1):
-        super().__init__(in_channel=in_channel, out_channel=out_channel, temp_pool=temp_pool)
+    def __init__(self, in_channel=32, out_channel=64):
+        super().__init__(in_channel=in_channel, out_channel=out_channel)
         self.pool1 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
 
     def forward(self, x):
@@ -309,6 +309,7 @@ class SSMTLRecon3D(nn.Module):
         y = F.interpolate(y, scale_factor=(1,2,2))
 
         y = self.block4(y)
+        y = F.interpolate(y, scale_factor=(1,2,2))
         return y
 
 class SSMTLModel(nn.Module):
@@ -395,6 +396,7 @@ class SSMTLAutoEncArrow(nn.Module):
         self.encoder = CNN3D(in_channel=in_channel, out_channel=out_channel)
         self.decoder = SSMTLRecon3D(in_channel=out_channel, out_channel=3)
 
+        self.pool_recon = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
         self.pool_arrow = nn.MaxPool3d(kernel_size=(7,2,2), stride=(7,2,2))
         self.arrow_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
                                         nn.ReLU(),
@@ -404,6 +406,7 @@ class SSMTLAutoEncArrow(nn.Module):
         
     def forward(self, x_masked, x_arrow):
         emb = self.encoder(x_masked)
+        emb = self.pool_recon(emb)
         y_recon = self.decoder(emb)
         
         y_arrow = self.encoder(x_arrow)
@@ -412,6 +415,21 @@ class SSMTLAutoEncArrow(nn.Module):
         y_arrow = self.arrow_head(y_arrow)
 
         return y_recon, y_arrow
+    
+class CNN3DResReconSSMTLDec(nn.Module):
+    def __init__(self, in_channel=32, out_channel=64):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+
+        self.encoder = CNN3DRes(in_channel=in_channel, out_channel=out_channel)
+        self.decoder = SSMTLRecon3D(in_channel=out_channel, out_channel=3)
+
+    def forward(self, x):
+        encoded = self.encoder(x)
+        recon = self.decoder(encoded)
+
+        return recon
 
 
 

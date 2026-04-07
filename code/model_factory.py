@@ -30,7 +30,8 @@ class ModelFactory:
             'CNN3DResReconSkipV2': CNN3DResReconSkipV2,
             'SSMTLModel': SSMTLModel,
             'SSMTLAutoencoder': SSMTLAutoEncoder,
-            'SSTMLAutoEncArrow':SSMTLAutoEncArrow
+            'SSTMLAutoEncArrow':SSMTLAutoEncArrow,
+            'CNN3DResReconSSMTLDec':CNN3DResReconSSMTLDec,
         }
         
         if model_name not in model_registry:
