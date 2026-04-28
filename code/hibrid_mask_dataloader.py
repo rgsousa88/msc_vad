@@ -107,6 +107,7 @@ class MaskGeneratorTorch:
 
                 indices[r_start:r_end, c_start:c_end] = -1
                 remaining_squares-=1
+                continue
 
             retries+=1
 
