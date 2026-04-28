@@ -78,6 +78,7 @@ class CNN3D(nn.Module):
         y = self.block1(x)
         y = self.block2(y)
         y = self.block3(y)
+        y = F.max_pool3d(y, kernel_size=(y.shape[2],2,2), stride=2)
 
         return y
 
@@ -243,22 +244,23 @@ class SSMTLRecon(nn.Module):
     def __init__(self, in_channel=64, out_channel=3):
         super().__init__()
         self.in_channel = in_channel
+        self.inter_channel = in_channel // 2
         self.out_channel = out_channel
 
-        self.block1 = nn.Sequential(nn.Conv2d(in_channels=in_channel, out_channels=in_channel, kernel_size=3, stride=1, padding='same'),
-                                    nn.ReLU(),
-                                    nn.Conv2d(in_channels=in_channel, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
+        self.block1 = nn.Sequential(nn.Conv2d(in_channels=in_channel, out_channels=self.inter_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.BatchNorm2d(num_features=self.inter_channel),
+                                    nn.ReLU(),)
+
+        self.block2 = nn.Sequential(nn.Conv2d(in_channels=self.inter_channel, out_channels=self.inter_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.BatchNorm2d(num_features=self.inter_channel),
+                                    nn.ReLU(),)
+
+        self.block3 = nn.Sequential(nn.Conv2d(in_channels=self.inter_channel, out_channels=self.inter_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.BatchNorm2d(num_features=self.inter_channel),
                                     nn.ReLU())
 
-        self.block2 = nn.Sequential(nn.Conv2d(in_channels=in_channel//2, out_channels=in_channel//2, kernel_size=3, stride=1, padding='same'),
-                                    nn.ReLU(),
-                                    nn.Conv2d(in_channels=in_channel//2, out_channels=in_channel//4, kernel_size=3, stride=1, padding='same'),
-                                    nn.ReLU())
-
-        self.block3 = nn.Sequential(nn.Conv2d(in_channels=in_channel//4, out_channels=in_channel//8, kernel_size=3, stride=1, padding='same'),
-                                    nn.ReLU())
-
-        self.block4 = nn.Sequential(nn.Conv2d(in_channels=in_channel//8, out_channels=out_channel, kernel_size=3, stride=1, padding='same'),
+        self.block4 = nn.Sequential(nn.Conv2d(in_channels=self.inter_channel, out_channels=out_channel, kernel_size=3, stride=1, padding='same'),
+                                    nn.BatchNorm2d(num_features=out_channel),
                                     nn.ReLU())
     
     def forward(self, x):
@@ -319,55 +321,54 @@ class SSMTLModel(nn.Module):
         self.out_channel = out_channel
 
         self.backbone = CNN3D(in_channel=in_channel, out_channel=out_channel)
-        self.pool_distil = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
-        self.pool_recon = nn.MaxPool3d(kernel_size=(6,2,2), stride=(6,2,2))
-        self.pool_class = nn.MaxPool3d(kernel_size=(7,2,2), stride=(7,2,2))
 
-        self.arrow_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+        self.arrow_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3, padding='same'),
+                                        nn.BatchNorm2d(num_features=32),
                                         nn.ReLU(),
+                                        nn.Dropout2d(p=0.3),
                                         nn.MaxPool2d(2,2),
                                         nn.Flatten(),
-                                        nn.Linear(32,2))
+                                        nn.Linear(128,2))
         
-        self.motion_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+        self.motion_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3, padding='same'),
+                                        nn.BatchNorm2d(num_features=32),
                                         nn.ReLU(),
+                                        nn.Dropout(p=0.3),
                                         nn.MaxPool2d(2,2),
                                         nn.Flatten(),
-                                        nn.Linear(32,2))
+                                        nn.Linear(128,2))
         
-        self.distil_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3),
+        self.distil_head = nn.Sequential(nn.Conv2d(in_channels=out_channel, out_channels=32, kernel_size=3, padding='same'),
+                                        nn.BatchNorm2d(num_features=32),
                                         nn.ReLU(),
+                                        nn.Dropout(p=0.3),
                                         nn.MaxPool2d(2,2),
                                         nn.Flatten(),
-                                        nn.Linear(32,1080))
+                                        nn.Linear(128,1080),
+                                        nn.ReLU())
 
         self.recon_head = SSMTLRecon(in_channel=out_channel)
 
     def forward(self, x_arrow, x_motion, x_recon, x_distil):
-        # x -> (B,3,9,H,W)
-        # input_arrow -> (B,3,7,H,W)
+        # input_arrow -> (B,3,6,H,W)
         # input_motion -> (B,3,7,H,W)
         # input_recon -> (B,3,6,H,W)
-        # input_distil -> (B,3,1,H,W)
+        # input_distil -> (B,3,7,H,W)
 
         y_arrow = self.backbone(x_arrow)
-        y_arrow = self.pool_class(y_arrow)
         y_arrow = torch.squeeze(y_arrow, dim=-3)
         y_arrow = self.arrow_head(y_arrow)
 
         y_motion = self.backbone(x_motion)
-        y_motion = self.pool_class(y_motion)
         y_motion = torch.squeeze(y_motion, dim=-3)
         y_motion = self.motion_head(y_motion)
 
         y_recon = self.backbone(x_recon)
-        y_recon = self.pool_recon(y_recon)
         y_recon = torch.squeeze(y_recon, dim=-3)
         y_recon = self.recon_head(y_recon)
 
         y_distil = self.backbone(x_distil)
-        y_distil = self.pool_distil(y_distil)
-        y_distil = torch.squeeze(y_distil, dim=-3)        
+        y_distil = torch.squeeze(y_distil, dim=-3)
         y_distil = self.distil_head(y_distil)
 
         return y_arrow, y_motion, y_recon, y_distil 
@@ -430,8 +431,3 @@ class CNN3DResReconSSMTLDec(nn.Module):
         recon = self.decoder(encoded)
 
         return recon
-
-
-
-
-

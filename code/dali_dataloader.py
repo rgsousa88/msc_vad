@@ -83,30 +83,71 @@ def video_pipe(file_root, shape=(224,224), train=True, device='gpu', sequence_le
 
     return video, labels.gpu()
 
+import mmap
+
 @do_not_convert
 class ExternalInputIterator(object):
     def __init__(self, batch_size, csv_file, seq_len=7):
         self.batch_size = batch_size
-        self.files = []
-        with open(csv_file, 'r') as f:
-            for row in csv.reader(f, delimiter=';'):
-                if row:
-                    self.files.append(row)
-        random.shuffle(self.files)
-        self.full_iterations = len(self.files) // self.batch_size
+        self.csv_file = csv_file
+        
+        # Memory-map the file for fast random access
+        self.file = open(csv_file, 'r+b')
+        self.mm = mmap.mmap(self.file.fileno(), 0)
+        
+        # Index line positions
+        self.line_positions = [0]
+        self.mm.seek(0)
+        for line in iter(self.mm.readline, b""):
+            self.line_positions.append(self.mm.tell())
+        
+        # Remove last position (EOF)
+        self.line_positions.pop()
+        
+        self.num_lines = len(self.line_positions)
+        self.full_iterations = self.num_lines // self.batch_size
         self.seq_len = seq_len
         self.p = 0.5
         self.indices = [i for i in range(self.seq_len)]
-
-        # self.motion_idx = [[0,1,3,4,5,6,8],[0,1,3,4,5,7,8],[0,1,3,4,5,6,7],[0,1,3,4,6,7,8],
-        #                    [0,2,3,4,5,6,8],[0,2,3,4,5,7,8],[0,2,3,4,5,6,7],[0,2,3,4,6,7,8],
-        #                    [1,2,3,4,5,7,8],[1,2,3,4,5,6,8],[0,2,3,4,6,7,8],
-        #                    [0,1,2,4,5,6,8],[0,1,2,4,5,7,8],[0,1,2,4,5,6,7],[0,1,2,4,6,7,8]]
-
-        # self.motion_idx = [[0,1,3,4,5,6,8],[0,1,3,4,5,7,8],[0,1,3,4,6,7,8],
-        #                    [0,2,3,4,5,6,8],[0,2,3,4,5,7,8],[0,2,3,4,6,7,8],
-        #                    [0,1,2,4,5,6,8],[0,1,2,4,5,7,8],[0,1,2,4,6,7,8]]
+        self.num_pos = 6
+    
+    def get_row_by_index(self, idx):
+        """Read row from memory-mapped file"""
+        self.mm.seek(self.line_positions[idx])
+        line = self.mm.readline().decode('utf-8').strip()
+        reader = csv.reader([line], delimiter=';')
+        return next(reader)
+    
+    def __del__(self):
+        """Cleanup"""
+        if hasattr(self, 'mm'):
+            self.mm.close()
+        if hasattr(self, 'file'):
+            self.file.close()
+    
+    def generate_positions(self,):
+        positions = []
         
+        for _ in range(self.num_pos):
+            pos = np.random.randint(1, 4)
+            positions.append(pos)
+
+        num_left = int(self.num_pos // 2)
+        
+        left_part = [-1*i for i in positions[:num_left]]
+        for i in range(num_left - 1):
+            left_part[i] += sum(left_part[i + 1:])
+
+        right_part = positions[num_left:]
+        for i in range(1, num_left):
+            right_part[i] += right_part[i - 1]
+
+        new_pos = left_part + [0] + right_part
+        new_pos = [i+15 for i in new_pos]
+
+        return new_pos
+    
+    
     def irregular_shuffle(self, indices):
         new_indices = indices
         i = random.randint(0, self.seq_len-2)
@@ -163,7 +204,8 @@ class ExternalInputIterator(object):
         
         batch = []
         
-        row = self.files[sample_idx]
+        #row = self.files[sample_idx]
+        row = self.get_row_by_index(sample_idx)
         num_files = len(row)
         for img_path in row[2:num_files]:
             with open(img_path, "rb") as f:
@@ -174,7 +216,7 @@ class ExternalInputIterator(object):
         
         batch.append(resnet)
         batch.append(yolo)
-        batch.append(np.array(self.create_motion_sample()).astype(np.int32))
+        batch.append(np.array(self.generate_positions()).astype(np.int32))
 
         key, prefix = self.get_key_prefix_encode(row[0])
         batch.append(key)
@@ -185,7 +227,7 @@ class ExternalInputIterator(object):
 @pipeline_def(num_threads=4, enable_conditionals=True, device_id=0, batch_size=4)
 def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, device='gpu', arrow_prob=0.5, motion_prob=0.5):
     *jpegs, resnet, yolo, motion_idx, key, prefix = fn.external_source(source=ExternalInputIterator(csv_file=ann_file, batch_size=batch_size),
-                               num_outputs=num_frames+5,
+                               num_outputs=num_frames+5, #num_frames should be equal to 31 when train is True
                                batch=False)
     
     images = fn.decoders.image(jpegs, device="mixed")
@@ -195,43 +237,47 @@ def ssmtl_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=True, devi
     sequence = fn.reshape(sequence, layout="FHWC")
     sequence = fn.crop_mirror_normalize(sequence, dtype=types.FLOAT, std=[255.0], output_layout="FHWC")
 
+    #[fn.sequence_rearrange(sequence, new_order=motion_idx)]
+
     if train:
         arrow_prob = 0.5
         motion_prob = 0.5
-        recon_idx = types.Constant(np.array([1,2,3,5,6,7]), shape=(6,), dtype=types.DALIDataType.INT32)
-        middle_frame = 4
+        #recon_idx = types.Constant(np.array([1,2,3,5,6,7]), shape=(6,), dtype=types.DALIDataType.INT32)
+        recon_idx = types.Constant(np.array([12,13,14,16,17,18]), shape=(6,), dtype=types.DALIDataType.INT32)
+        central_indexes = types.Constant(np.array([12,13,14,15,16,17,18]), shape=(7,), dtype=types.DALIDataType.INT32)
+        middle_frame = 15
     else:
         arrow_prob = 0.0
         motion_prob = 0.0
         recon_idx = types.Constant(np.array([0,1,2,4,5,6]), shape=(6,), dtype=types.DALIDataType.INT32)
+        central_indexes = types.Constant(np.array([0,1,2,3,4,5,6]), shape=(7,), dtype=types.DALIDataType.INT32)
         middle_frame = 3
-    
-    do_backward = fn.random.coin_flip(probability=arrow_prob, dtype=types.DALIDataType.BOOL)
-    do_motion = fn.random.coin_flip(probability=motion_prob, dtype=types.DALIDataType.BOOL)
 
     if train:
-        seq_backward = sequence[1:-1,:]
-        seq_motion = sequence[1:-1,:]
+        seq_backward = fn.sequence_rearrange(sequence, new_order=recon_idx)
+        seq_motion = fn.sequence_rearrange(sequence, new_order=central_indexes)
     else:
         seq_backward = sequence
         seq_motion = sequence
 
     label_backward = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
+    do_backward = fn.random.coin_flip(probability=arrow_prob, dtype=types.DALIDataType.BOOL)
 
     if do_backward:
         seq_backward = seq_backward[::-1,:,:,:]
         label_backward = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
     
     label_sequence = fn.zeros(shape=1, dtype=types.DALIDataType.INT64)
+    do_motion = fn.random.coin_flip(probability=motion_prob, dtype=types.DALIDataType.BOOL)
 
     if do_motion:
-        #idx = fn.random.choice(9)
         seq_motion = fn.sequence_rearrange(sequence, new_order=motion_idx)
         label_sequence = fn.ones(shape=1, dtype=types.DALIDataType.INT64)
     
     seq_recon = fn.sequence_rearrange(sequence, new_order=recon_idx)
-    seq_distill = sequence[middle_frame,:] #(H,W,C)
-    seq_distill = fn.expand_dims(seq_distill, axes=[0], new_axis_names="F")
+    #seq_distill = sequence[middle_frame,:] #(H,W,C)
+    #seq_distill = fn.expand_dims(seq_distill, axes=[0], new_axis_names="F")
+    seq_distill = fn.sequence_rearrange(sequence, new_order=central_indexes)
 
     seq_backward = fn.transpose(seq_backward, perm=[3,0,1,2]) #FHWC (0,1,2,3) -> CFHW (3,0,1,2)
     seq_motion = fn.transpose(seq_motion, perm=[3,0,1,2])
@@ -338,7 +384,8 @@ class MaskedInputIterator(object):
             mask = np.ones((self.input_size, self.input_size, 3), dtype=np.uint8)
             if self.is_train:
                 batch_mask_x, batch_mask_y = self.mask_generator.get_squares_coords()
-                for i in range(self.n_squares):
+                n_gen_squares = min(len(batch_mask_x), len(batch_mask_y))
+                for i in range(n_gen_squares):
                     r, c = batch_mask_x[i], batch_mask_y[i]
                     mask[r-self.radius:r+self.radius, c-self.radius:c+self.radius,:] = 0
             batch.append(mask)
@@ -453,8 +500,3 @@ def masked_arrow_pipe(ann_file, num_frames, batch_size, shape=(64,64), train=Tru
 if __name__ == "__main__":
     pipe = simple_pipeline(image_dir, batch_size=max_batch_size, num_threads=1, device_id=0)
     pipe.build()
-
-
-
-    
-

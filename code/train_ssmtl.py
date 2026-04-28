@@ -24,12 +24,8 @@ import os
 from trainUtils import *
 from configParser import ConfigParser
 
-
 os.environ['DALI_DISABLE_NVML'] = '1'
 
-torch.backends.cudnn.benchmark = True  # Auto-tune para hardware específico
-torch.backends.cuda.matmul.allow_tf32 = True  # Usar TF32 na RTX 40
-torch.backends.cudnn.allow_tf32 = True
 
 def create_torch_loaders(config, prefetch_factor=4):
     trainDataset = SSMTLModelDataset(annotation_path=config['train_ann'],
@@ -65,16 +61,20 @@ def create_torch_loaders(config, prefetch_factor=4):
     return trainLoader, valLoader
 
 def create_dali_loaders(config):   
-    returnNames = ['x_arrow', 'l_arrow', 'x_motion', 'l_motion', 'x_recon', 'x_distil', 'feat_distil']
+    returnNames = ['x_arrow', 'l_arrow',
+                   'x_motion', 'l_motion',
+                   'x_recon', 'x_distil',
+                   'feat_distil',
+                   'key','prefix']
 
     train_pipe = ssmtl_pipe(ann_file=config['train_ann'],
-                            num_frames=9,
+                            num_frames=31,
                             batch_size=config['batch_size'],
                             num_threads=config['workers'],
                             train=True)
     
     val_pipe = ssmtl_pipe(ann_file=config['val_ann'],
-                          num_frames=9,
+                          num_frames=31,
                           batch_size=config['batch_size'],
                           num_threads=config['workers'],
                           train=True)
@@ -89,9 +89,6 @@ def create_dali_loaders(config):
 
 def train(config):
     device = set_device(use_gpu=config['use_gpu'])
-
-    # transfTrain = [v2.ColorJitter(brightness=.5, contrast=.5, hue=.3),
-    #                v2.RandomHorizontalFlip(p=0.5)]
     trainLoader, valLoader = create_dali_loaders(config)
 
     model = SSMTLModel(in_channel=config['in_channel'], out_channel=config['out_channel'])
@@ -108,19 +105,25 @@ def train(config):
     loss_recon = nn.L1Loss(reduction='mean')
     loss_distill = nn.L1Loss(reduction='mean')
 
-    optimizer = optim.Adam(lr=0.005, params=model.parameters())
+    optimizer = optim.Adam(lr=0.001, params=model.parameters())
 
-    scheduler_config = config.get('scheduler_param', {})
-    scheduler = get_scheduler(config['scheduler'], optimizer=optimizer, **scheduler_config)
+    #scheduler_config = config.get('scheduler_param', {})
+    #scheduler = lr_scheduler.StepLR(optimizer=optimizer, step_size=scheduler_config['step_size'])
 
     start_time = time()
     best_val_loss = float('inf')
 
-    writer = SummaryWriter(log_dir=f"runs/ssmtl_{int(time())}")
+    writer = SummaryWriter(log_dir=f"runs/{config['model']}_{int(time())}")
     
     for epoch in range(config['num_epochs']):
         tic = time()
         
+        train_loss_recon = 0.0
+        train_loss_arrow = 0.0
+        train_loss_motion = 0.0
+        train_loss_distill = 0.0
+        train_acc_arrow = 0.0
+        train_acc_motion = 0.0
         loss_value = 0.0
         n_batches = 0
 
@@ -129,19 +132,34 @@ def train(config):
         model.train()
         for batch in t_train:
             try:
-                x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil = batch[0]['x_arrow'], batch[0]['l_arrow'], batch[0]['x_motion'], batch[0]['l_motion'], batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
+                x_arrow, l_arrow = batch[0]['x_arrow'], batch[0]['l_arrow']
+                x_motion, l_motion = batch[0]['x_motion'], batch[0]['l_motion']
+                x_recon, x_distil, feat_distil = batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
 
                 y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
-                #y_arrow, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
 
-                loss = loss_arrow(y_arrow, l_arrow.squeeze())
-                loss += loss_motion(y_motion, l_motion.squeeze())
-                loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
-                loss += 0.2 * loss_distill(y_distil, feat_distil)
+                loss_r = loss_recon(y_recon, x_distil[:,:,3,:,:].reshape(y_recon.shape))
+                loss_a = loss_arrow(y_arrow, l_arrow.squeeze())
+                loss_m = loss_motion(y_motion, l_motion.squeeze())
+                loss_d = loss_distill(y_distil, feat_distil)
+
+                loss = loss_r + loss_a + loss_m + 0.2 * loss_d
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
+                pred_arrow = torch.argmax(y_arrow, dim=1)
+                pred_motion = torch.argmax(y_motion, dim=1)
+                acc_arrow = (pred_arrow == l_arrow.squeeze()).float().mean()
+                acc_motion = (pred_motion == l_motion.squeeze()).float().mean()
+                
+                train_loss_recon += loss_r.detach().item()
+                train_loss_arrow += loss_a.detach().item()
+                train_loss_motion += loss_m.detach().item()
+                train_loss_distill += loss_d.detach().item()
+                train_acc_arrow += acc_arrow.detach().item()
+                train_acc_motion += acc_motion.detach().item()
 
                 loss_value += loss.detach().item()
                 n_batches += 1
@@ -155,9 +173,21 @@ def train(config):
                 print(f"Exception {e}")
                 return
         
-        scheduler.step()
+        #scheduler.step()
         train_loss = loss_value / n_batches
+        train_loss_recon /= n_batches
+        train_loss_arrow /= n_batches
+        train_loss_motion /= n_batches
+        train_loss_distill /= n_batches
+        train_acc_arrow /= n_batches
+        train_acc_motion /= n_batches
         
+        val_loss_recon = 0.0
+        val_loss_arrow = 0.0
+        val_loss_motion = 0.0
+        val_loss_distill = 0.0
+        val_acc_arrow = 0.0
+        val_acc_motion = 0.0
         loss_value = 0.0
         n_batches = 0
         
@@ -167,15 +197,30 @@ def train(config):
         for batch in t_val:
             try:
                 with torch.no_grad():
-                    x_arrow, l_arrow, x_motion, l_motion, x_recon, x_distil, feat_distil = batch[0]['x_arrow'], batch[0]['l_arrow'], batch[0]['x_motion'], batch[0]['l_motion'], batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
+                    x_arrow, l_arrow = batch[0]['x_arrow'], batch[0]['l_arrow']
+                    x_motion, l_motion = batch[0]['x_motion'], batch[0]['l_motion']
+                    x_recon, x_distil, feat_distil = batch[0]['x_recon'], batch[0]['x_distil'], batch[0]['feat_distil']
 
                     y_arrow, y_motion, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
-                    #y_arrow, y_recon, y_distil = model(x_arrow, x_motion, x_recon, x_distil)
                     
-                    loss = loss_arrow(y_arrow, l_arrow.squeeze())
-                    loss += loss_motion(y_motion, l_motion.squeeze())
-                    loss += loss_recon(y_recon, x_distil.reshape(y_recon.shape))
-                    loss += 0.2 * loss_distill(y_distil, feat_distil)
+                    loss_r = loss_recon(y_recon, x_distil[:,:,3,:,:].reshape(y_recon.shape))
+                    loss_a = loss_arrow(y_arrow, l_arrow.squeeze())
+                    loss_m = loss_motion(y_motion, l_motion.squeeze())
+                    loss_d = loss_distill(y_distil, feat_distil)
+
+                    loss = loss_r + loss_a + loss_m + 0.2 * loss_d
+
+                    pred_arrow = torch.argmax(y_arrow, dim=1)
+                    pred_motion = torch.argmax(y_motion, dim=1)
+                    acc_arrow = (pred_arrow == l_arrow.squeeze()).float().mean()
+                    acc_motion = (pred_motion == l_motion.squeeze()).float().mean()
+                    
+                    val_loss_recon += loss_r.detach().item()
+                    val_loss_arrow += loss_a.detach().item()
+                    val_loss_motion += loss_m.detach().item()
+                    val_loss_distill += loss_d.detach().item()
+                    val_acc_arrow += acc_arrow.detach().item()
+                    val_acc_motion += acc_motion.detach().item()
                 
                 loss_value += loss.detach().item()
                 n_batches += 1
@@ -190,16 +235,39 @@ def train(config):
                 return
         
         val_loss = loss_value / n_batches
+        val_loss_recon /= n_batches
+        val_loss_arrow /= n_batches
+        val_loss_motion /= n_batches
+        val_loss_distill /= n_batches
+        val_acc_arrow /= n_batches
+        val_acc_motion /= n_batches
 
         # Tensorboard logging
         writer.add_scalar("Loss/train", train_loss, epoch)
+        writer.add_scalar("Loss/train_recon", train_loss_recon, epoch)
+        writer.add_scalar("Loss/train_arrow", train_loss_arrow, epoch)
+        writer.add_scalar("Loss/train_motion", train_loss_motion, epoch)
+        writer.add_scalar("Loss/train_distill", train_loss_distill, epoch)
+        writer.add_scalar("Accuracy/train_arrow", train_acc_arrow, epoch)
+        writer.add_scalar("Accuracy/train_motion", train_acc_motion, epoch)
+
         writer.add_scalar("Loss/val", val_loss, epoch)
+        writer.add_scalar("Loss/val_recon", val_loss_recon, epoch)
+        writer.add_scalar("Loss/val_arrow", val_loss_arrow, epoch)
+        writer.add_scalar("Loss/val_motion", val_loss_motion, epoch)
+        writer.add_scalar("Loss/val_distill", val_loss_distill, epoch)
+        writer.add_scalar("Accuracy/val_arrow", val_acc_arrow, epoch)
+        writer.add_scalar("Accuracy/val_motion", val_acc_motion, epoch)
+        
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             saveModel(config=config, model=model, epoch=epoch, val_loss=val_loss, val_acc=0.0)
 
         epochReport = f"Train Loss {train_loss:.4f} Val Loss {val_loss:.4f}\n"
+        print(f"acc arrow train = {train_acc_arrow:.4f}, val = {val_acc_arrow:.4f}")
+        print(f"acc motion train = {train_acc_motion:.4f}, val = {val_acc_motion:.4f}")
+        print(f"loss_resnet = {train_loss_distill:.4f}, loss_recon = {train_loss_recon:.4f}")
         print(f"Epoch {epoch} LR {optimizer.param_groups[0]['lr']:.4f} {epochReport}")
         print(f"Elapsed Time {time() - start_time:.4f}")
 
