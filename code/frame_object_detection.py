@@ -52,12 +52,10 @@ def detect(yolo_model, resnet_model, ann_file, sample_dir:str, base_dest_dir:str
             dest_dir = os.path.join(base_sample_dest_dir, base_sample_id)
             dest_dir_logits = os.path.join(base_sample_dest_dir, base_sample_id, "resnet_logits")
             dest_dir_yolo_probs = os.path.join(base_sample_dest_dir, base_sample_id, "yolo_probs")
-            
+
             if not os.path.exists(dest_dir):
                 print(f"Creating {dest_dir}")
                 os.makedirs(dest_dir)
-            # else:
-            #     return
             
             if not os.path.exists(dest_dir_logits):
                 print(f"Creating {dest_dir_logits}")
@@ -129,7 +127,7 @@ def process_single_directory(yolo_model, resnet50_model, base_dest_path, window,
     """Processa um único diretório - função para ser executada em thread"""
     dest_ann_file = os.path.join(base_dest_path, f"annotation_{os.path.basename(sample_dir)}.csv")
     
-    with open(dest_ann_file, 'w') as ann_file:
+    with open(dest_ann_file, 'a') as ann_file:
         print(f"Detecting in folder {sample_dir}")
         detect(yolo_model, resnet50_model, ann_file, sample_dir, base_dest_path, window=window)
     
@@ -197,7 +195,7 @@ def main(base_path: str, base_dest_path: str, window=2):
 
     for i in range(len(sample_dirs_val)):
         dest_ann_file = os.path.join(base_dest_path, f"annotation_{os.path.basename(sample_dirs_val[i])}.csv")
-        with open(dest_ann_file, 'w') as ann_file:
+        with open(dest_ann_file, 'a') as ann_file:
             print(f"Detecting in folder  {sample_dirs_val[i]}")
             detect(yolo_model, resnet50_model, ann_file, sample_dirs_val[i], base_dest_path, window=window)
             break
@@ -207,4 +205,4 @@ def main(base_path: str, base_dest_path: str, window=2):
     gc.collect()
 
 if __name__ == "__main__":
-    extract_with_threads(base_path=base_path_train, base_dest_path=base_dest_path_train, window=5, num_threads=8)
+    extract_with_threads(base_path=base_path_train, base_dest_path=base_dest_path_train, window=15, num_threads=8)
