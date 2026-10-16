@@ -22,7 +22,7 @@ class ModelFactory:
             'ConvBlock3D': ConvBlock3D,
             'UpConvBlock3D': UpConvBlock3D,
             'CNN3D': CNN3D,
-            'CNN3DRes': CNN3DRes,
+            'CNN3DEncoder': CNN3DEncoder,
             'CameraClassifier': CameraClassifier,
             'CNN3DRecon': CNN3DRecon,
             'CNN3DResRecon': CNN3DResRecon,
@@ -31,7 +31,11 @@ class ModelFactory:
             'SSMTLModel': SSMTLModel,
             'SSMTLAutoencoder': SSMTLAutoEncoder,
             'SSTMLAutoEncArrow':SSMTLAutoEncArrow,
-            'CNN3DResReconSSMTLDec':CNN3DResReconSSMTLDec,
+            'CNN3DReconBase':CNN3DReconBase,
+            'CNN3DReconArrow':CNN3DReconArrow,
+            'CNN3DReconTime':CNN3DReconTime,
+            'STReconTime':STReconTime,
+            'CNN3DReconTimeAttention':CNN3DReconTimeAttention
         }
         
         if model_name not in model_registry:

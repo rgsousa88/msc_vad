@@ -6,6 +6,27 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 import os
 from datetime import datetime
+import random
+import numpy as np
+
+def set_seed(seed: int = 42):
+    # Python & OS
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    
+    # NumPy
+    np.random.seed(seed)
+    
+    # PyTorch Core (CPU and GPU)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # Multi-GPU setups
+        
+    # PyTorch Deterministic Backend
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 class ReconCustomLoss(nn.Module):
     def __init__(self, reduction='sum'):
@@ -110,8 +131,9 @@ def saveModel(config, model, epoch, val_loss, val_acc, optimizer=None, scheduler
 
         checkpoint_path = "checkpoint"
         os.makedirs(checkpoint_path, exist_ok=True)
+        seq_len = config.get('seqLen','')
 
-        filename = f"{config['model']}_{timestamp}.pth"
+        filename = f"{config['model']}_{seq_len}_{timestamp}.pth"
         fullPath = os.path.join(checkpoint_path, filename)
 
         checkpoint = {

@@ -77,43 +77,43 @@ class MaskGeneratorTorch:
     
     def get_squares_coords(self,):
         """
-        Creates r: List(int), c: List(int) coords for one single frame 
+        Creates r: List(int), c: List(int) coords for one single frame.
+
+        Squares are sampled from a non-overlapping stride grid (tile size =
+        2*radius) instead of the previous rejection sampler. The old sampler
+        reserved a 2*radius buffer around every placed square and gave up after
+        ``max_retries``, so it saturated around ~47% coverage for any
+        ``cover_factor`` above ~0.5 and varied run to run. The grid sampler
+        places exactly ``min(num_squares, n_tiles)`` squares, so the realised
+        coverage matches ``cover_factor`` (= num_squares * tile_area / area) and
+        is stable. It is also O(num_squares) with no CPU spin.
+
+        Only the selection of tiles is random; the tile lattice is fixed (BEiT
+        style). If grid-aligned holes are undesirable, randomise the caller-side
+        offset instead of reintroducing rejection sampling.
         """
-        #self.__reset_indices__()
-        remaining_squares = self.num_squares
-        #print(f"Num squares {self.num_squares}")
-        pixel_coords_x = []
-        pixel_coords_y = []
-        indices = self.grid_r * self.width_tensor + self.grid_w
-        #print(indices)
-        retries = 0
+        tile = 2 * self.radius
+        if tile <= 0 or self.num_squares <= 0:
+            return [], []
 
-        while remaining_squares > 0 and retries < self.max_retries:
-            r = torch.randint(self.radius, self.height - self.radius, size=(1,))
-            c = torch.randint(self.radius, self.width - self.radius, size=(1,))
+        rows = torch.arange(0, self.height - tile + 1, tile)
+        cols = torch.arange(0, self.width - tile + 1, tile)
+        if rows.numel() == 0 or cols.numel() == 0:
+            return [], []
 
-            center_r = r-self.radius
-            center_c = c-self.radius
-            
-            if indices[center_r, center_c] > 0:
-                
-                pixel_coords_x.append(r.cpu().item())
-                pixel_coords_y.append(c.cpu().item())
+        grid_r, grid_c = torch.meshgrid(rows + self.radius,
+                                        cols + self.radius,
+                                        indexing='ij')
+        centers_r = grid_r.reshape(-1)
+        centers_c = grid_c.reshape(-1)
 
-                r_start = max(0, center_r - 2*self.radius)
-                r_end = min(self.height, center_r + 2*self.radius)
-                c_start = max(0, center_c - 2*self.radius)
-                c_end = min(self.width, center_c + 2*self.radius)
+        n_total = centers_r.numel()
+        n_pick = min(int(self.num_squares), n_total)
+        if n_pick <= 0:
+            return [], []
 
-                indices[r_start:r_end, c_start:c_end] = -1
-                remaining_squares-=1
-                continue
-
-            retries+=1
-
-        del indices
-        
-        return pixel_coords_x, pixel_coords_y
+        perm = torch.randperm(n_total)[:n_pick]
+        return centers_r[perm].tolist(), centers_c[perm].tolist()
 
     def get_batched_squares_coords(self, n_batch=1, n_frame_per_batch=2):        
         batch_coords_x = []
