@@ -118,6 +118,12 @@ def _make_mask_from_saliency(cover_factor, square_size, min_saliency, mask_prob)
     """
 
     def mask_from_saliency(saliency):
+        # DALI can hand the aggregated map with singleton dims attached (e.g.
+        # (H, W, 1) when color_space_conversion keeps a trailing channel, or
+        # (1, H, W) from the batch axis). Collapse them to the 2D (H, W) map the
+        # sampler expects — otherwise ``H, W = saliency.shape`` raises
+        # "too many values to unpack".
+        saliency = np.squeeze(np.asarray(saliency, dtype=np.float32))
         H, W = saliency.shape
         num_squares = int(cover_factor * H * W / (square_size * square_size))
         centers = motion_region_selector.sample_squares_from_map(
