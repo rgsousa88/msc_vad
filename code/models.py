@@ -127,6 +127,60 @@ class EfficientChannelAttention3D(nn.Module):
 
         return x * y  # broadcast attention over (D, H, W)
 
+class ChannelAttention3D(nn.Module):
+    """SE-style channel attention that keeps the time axis.
+
+    The previous ECA block aggregated over H, W *and* T (``amax(dim=2)``) before
+    the gate, so every frame shared a single channel gate. Here the descriptor
+    is pooled over H, W only, so the 1x1x1 MLP emits one gate per frame and the
+    temporal structure is preserved.
+    """
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        hidden = max(channels // reduction, 4)
+        self.mlp = nn.Sequential(
+            nn.Conv3d(channels, hidden, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(hidden, channels, kernel_size=1, bias=False))
+
+    def forward(self, x):
+        # x: (N, C, T, H, W)
+        avg = x.mean(dim=(3, 4), keepdim=True)    # (N, C, T, 1, 1)
+        mx = x.amax(dim=(3, 4), keepdim=True)     # (N, C, T, 1, 1)
+        gate = torch.sigmoid(self.mlp(avg + mx))
+        return x * gate
+
+class SpatialAttention3D(nn.Module):
+    """CBAM-style spatial attention computed per frame (keeps T)."""
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv3d(2, 1, kernel_size=(1, kernel_size, kernel_size),
+                              padding=(0, padding, padding), bias=False)
+
+    def forward(self, x):
+        # x: (N, C, T, H, W)
+        avg = x.mean(dim=1, keepdim=True)         # (N, 1, T, H, W)
+        mx = x.amax(dim=1, keepdim=True)          # (N, 1, T, H, W)
+        attn = torch.sigmoid(self.conv(torch.cat([avg, mx], dim=1)))
+        return x * attn
+
+class CBAM3D(nn.Module):
+    """Channel + spatial attention for 3D feature maps, preserving the time axis.
+
+    Replaces EfficientChannelAttention3D, which collapsed T and shared one gate
+    across all frames.
+    """
+    def __init__(self, channels: int, reduction: int = 8, kernel_size: int = 7):
+        super().__init__()
+        self.channel = ChannelAttention3D(channels, reduction=reduction)
+        self.spatial = SpatialAttention3D(kernel_size=kernel_size)
+
+    def forward(self, x):
+        x = self.channel(x)
+        x = self.spatial(x)
+        return x
+
 class CNN3DEncoder(CNN3D):
     def __init__(self, inner_channel=32, out_channel=64, norm_type='instance'):
         super().__init__(inner_channel=inner_channel, out_channel=out_channel, norm_type=norm_type)
@@ -144,9 +198,9 @@ class CNN3DEncoderAttention(CNN3D):
     def __init__(self, inner_channel=32, out_channel=64, norm_type='instance'):
         super().__init__(inner_channel=inner_channel, out_channel=out_channel, norm_type=norm_type)
         self.pool1 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
-        self.att1 = EfficientChannelAttention3D(C=self.inner_channel)
-        self.att2 = EfficientChannelAttention3D(C=self.out_channel)
-        self.att3 = EfficientChannelAttention3D(C=self.out_channel)
+        self.att1 = CBAM3D(channels=self.inner_channel)
+        self.att2 = CBAM3D(channels=self.out_channel)
+        self.att3 = CBAM3D(channels=self.out_channel)
 
     def forward(self, x):
         y1 = self.block1(x)
