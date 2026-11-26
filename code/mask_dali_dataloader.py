@@ -15,6 +15,36 @@ import mmap
 
 random.seed(12334)
 
+# PID of the process that imported this module. DALI's ``external_source`` with
+# ``parallel=True`` forks workers *after* this seed was applied, so every worker
+# would inherit the same RNG state and emit identical masks/shuffles.
+_seed_worker_origin_pid = os.getpid()
+_seed_worker_current_pid = None
+
+
+def seed_worker_if_forked(base=12334):
+    """Re-seed the global RNGs once per forked worker process.
+
+    Only runs when called from a process whose PID differs from the import-time
+    PID (i.e. a forked DALI worker); the main process is left untouched so the
+    seed set by ``trainUtils.set_seed`` stays intact. Idempotent per process, so
+    the stream advances normally across samples instead of resetting every call.
+    """
+    global _seed_worker_current_pid
+    pid = os.getpid()
+    if pid == _seed_worker_origin_pid or pid == _seed_worker_current_pid:
+        return
+    seed = base + (pid % 100000)
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+    except Exception:
+        pass
+    _seed_worker_current_pid = pid
+
+
 @do_not_convert
 class ExternalInputIterator(object):
     def __init__(self, batch_size, csv_file, seq_len=7):
@@ -327,13 +357,20 @@ class MaskedInputIteratorV2(object):
                                                  percent=cover_factor, square_size=square_size,
                                                  device='cpu')
     
-    def get_key_prefix_encode(self, resnet_row):
-        # (Mantido exatamente como o seu)
-        dirname = os.path.dirname(os.path.dirname(resnet_row))
-        frame_id = os.path.basename(dirname)
-        dirname = os.path.dirname(dirname)
-        sample_id = os.path.basename(dirname)
-        key = f"{sample_id}_{frame_id}".encode('utf-8')
+    def get_key_prefix_encode(self, resnet_row, is_full_frame=False):
+        # Full-frame rows carry the key path in row[0]:
+        #   .../val_frames/<sample_id>/<sample_id>_<frame_id>.png
+        # so the "<sample_id>_<frame_id>" key is just the file stem. The orig rows
+        # encode the key two/three levels up (YOLO-crop .npy path structure).
+        if is_full_frame:
+            key = os.path.splitext(os.path.basename(resnet_row))[0]
+        else:
+            dirname = os.path.dirname(os.path.dirname(resnet_row))
+            frame_id = os.path.basename(dirname)
+            dirname = os.path.dirname(dirname)
+            sample_id = os.path.basename(dirname)
+            key = f"{sample_id}_{frame_id}"
+        key = key.encode('utf-8')
         length_prefix = struct.pack('<i', len(key))
         return np.frombuffer(length_prefix + key, dtype=np.int8), np.frombuffer(length_prefix, dtype=np.int8)
 
@@ -416,6 +453,7 @@ class MaskedInputTimeShuffleIteratorV2(MaskedInputIteratorV2):
         return np.array(indices, dtype=np.int32), np.array([label], dtype=np.int32)
 
     def __call__(self, sample_info):
+        seed_worker_if_forked()
         sample_idx = sample_info.idx_in_epoch
         if sample_info.iteration >= self.full_iterations:
             raise StopIteration()
@@ -589,7 +627,8 @@ def masked_time_pipe(ann_file, num_frames, pipe_batch_size=4, shape=(64,64), seq
                      mask_prob=0.9,           # probabilidade de aplicar máscara
                      shuffle_temporal=True,   # se embaralha temporalmente
                      random_window=True,      # se usa janela aleatória
-                     augment=False):          # aug de treino (flip + fotométrico), train-only
+                     augment=False,           # aug de treino (flip + fotométrico), train-only
+                     parallel=False):         # external_source(parallel=...) worker pool
     num_outputs = num_frames + 5
     *outputs, = fn.external_source(source=MaskedInputTimeShuffleIteratorV2(csv_file=ann_file,
                                                               batch_size=pipe_batch_size,
@@ -600,7 +639,8 @@ def masked_time_pipe(ann_file, num_frames, pipe_batch_size=4, shape=(64,64), seq
                                                               cover_factor=cover_factor,
                                                               square_size=square_size),
                                    num_outputs=num_outputs,
-                                   batch=False)
+                                   batch=False,
+                                   parallel=parallel)
     
     jpegs = outputs[:num_frames]
     mask_2d = outputs[num_frames] # A máscara espacial única
